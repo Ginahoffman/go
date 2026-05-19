@@ -1,0 +1,15 @@
+# Build artifacts
+/tmp/.build_cache/
+sys-svc
+
+# Local runtime data
+*.log
+.ep*
+access_urls.txt
+
+# System directories (if running locally for testing)
+/opt/gateway/
+/etc/letsencrypt/
+
+# OS generated files
+.DS_Store

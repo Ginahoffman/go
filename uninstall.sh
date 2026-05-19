@@ -16,6 +16,7 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     systemctl disable gateway gateway-notify 2>/dev/null
     rm -f /etc/systemd/system/gateway*.service
     rm -rf /opt/gateway
+    rm -f /usr/local/bin/gateway
     rm -f /usr/local/bin/sys-svc
     systemctl daemon-reload
     echo -e "${GREEN}[+] Gateway Security removed successfully${NC}"
