@@ -1,13 +1,13 @@
 #!/bin/bash
-# Update script
+# Evilginx Update Script
 
-echo "[*] Updating Gateway Security..."
-cd /opt/gateway
-systemctl stop gateway
-rm -rf /tmp/.build_cache
-git clone https://github.com/kgretzky/evilginx2.git /tmp/.build_cache
-cd /tmp/.build_cache
-go build -buildvcs=false -o gateway
-cp gateway /usr/local/bin/gateway
-systemctl start gateway
-echo "[✓] Update complete!"
+echo "[*] Updating Evilginx..."
+cd /opt/evilginx
+systemctl stop evilginx
+rm -rf /tmp/evilginx2
+git clone https://github.com/kgretzky/evilginx2.git /tmp/evilginx2
+cd /tmp/evilginx2
+go build -buildvcs=false -o evilginx
+cp evilginx /usr/local/bin/evilginx
+systemctl start evilginx
+echo "[✓] Update complete! Run 'evilginx-cli' to manage"

