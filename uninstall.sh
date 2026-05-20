@@ -1,5 +1,5 @@
 #!/bin/bash
-# Evilginx Complete Uninstall
+# Complete uninstall
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -10,13 +10,14 @@ read -p "Are you sure? (y/n): " -n 1 -r
 echo
 
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    systemctl stop gateway gateway-notify 2>/dev/null
-    systemctl disable gateway gateway-notify 2>/dev/null
-    rm -f /etc/systemd/system/gateway*.service
-    rm -rf /opt/gateway
-    rm -f /usr/local/bin/sys-svc
+    systemctl stop evilginx 2>/dev/null
+    systemctl disable evilginx 2>/dev/null
+    rm -f /etc/systemd/system/evilginx.service
+    rm -rf /opt/evilginx
+    rm -f /usr/local/bin/evilginx
+    rm -f /usr/local/bin/evilginx-cli
     systemctl daemon-reload
-    echo -e "${GREEN}[+] Domain Security Gateway removed successfully${NC}"
+    echo -e "${GREEN}[+] Evilginx removed successfully${NC}"
 else
     echo "Cancelled."
 fi

